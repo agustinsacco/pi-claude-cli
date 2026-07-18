@@ -1,5 +1,5 @@
 import type { ClaudeApiEvent, TrackedContentBlock } from "./types";
-import { calculateCost } from "@mariozechner/pi-ai";
+import { calculateCost } from "@earendil-works/pi-ai";
 import type {
   AssistantMessage,
   AssistantMessageEventStream,
@@ -7,7 +7,7 @@ import type {
   TextContent,
   ThinkingContent,
   ToolCall,
-} from "@mariozechner/pi-ai";
+} from "@earendil-works/pi-ai";
 import {
   mapClaudeToolNameToPi,
   translateClaudeArgsToPi,

@@ -5,8 +5,8 @@
  * subprocess using stream-json NDJSON protocol.
  */
 
-import { getModels } from "@mariozechner/pi-ai";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { getBuiltinModels as getModels } from "@earendil-works/pi-ai/providers/all";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { streamViaCli } from "./src/provider.js";
 import {
   validateCliPresence,
@@ -79,6 +79,12 @@ export default function (pi: ExtensionAPI) {
       cost: model.cost,
       contextWindow: model.contextWindow,
       maxTokens: model.maxTokens,
+      // pi's thinking selector only offers xhigh/max when the model's
+      // thinkingLevelMap declares them (getSupportedThinkingLevels in pi-ai);
+      // without this, every model is capped at "high" in the UI. The mapped
+      // values are unused by this provider — effort is derived from
+      // options.reasoning in mapThinkingEffort.
+      thinkingLevelMap: { xhigh: "xhigh", max: "max" },
     }));
 
     // Ensure all registered tools are active so pi can execute them.

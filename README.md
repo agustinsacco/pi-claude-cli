@@ -1,6 +1,6 @@
 # pi-claude-cli
 
-A [pi](https://github.com/mariozechner/pi-coding-agent) extension that routes LLM calls through the [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) as a subprocess. Use your Claude Pro/Max subscription as the LLM backend — no API key, no separate billing.
+A [pi](https://github.com/earendil-works/pi) extension that routes LLM calls through the [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) as a subprocess. Use your Claude Pro/Max subscription as the LLM backend — no API key, no separate billing.
 
 ## How it works
 
@@ -10,7 +10,7 @@ The extension registers as a custom pi provider exposing all Claude models. Each
 
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated (`claude` on PATH)
 - A Claude Pro or Max subscription
-- [pi](https://github.com/mariozechner/pi-coding-agent) or [GSD](https://github.com/gsd-build/gsd-2)
+- [pi](https://github.com/earendil-works/pi) or [GSD](https://github.com/gsd-build/gsd-2)
 
 ## Installation
 
@@ -31,7 +31,7 @@ Then select a Claude model via `/model` in the interactive UI. All Claude models
 - Exposes custom pi tools to Claude via MCP (schema-only, no execution)
 - Break-early pattern prevents Claude CLI from auto-executing tools
 - Session resume via `--resume` eliminates history replay on follow-up turns
-- Configurable thinking effort with elevated budgets for Opus models
+- Configurable thinking effort across the full ladder (low to max) for all models, with elevated mapping for Opus
 - Cross-platform subprocess management (Windows, macOS, Linux)
 - Inactivity timeout and process registry for cleanup
 

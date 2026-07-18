@@ -1,12 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
-// Mock @mariozechner/pi-ai before importing event-bridge
-vi.mock("@mariozechner/pi-ai", () => ({
+// Mock @earendil-works/pi-ai before importing event-bridge
+vi.mock("@earendil-works/pi-ai", () => ({
   calculateCost: vi.fn(),
 }));
 
 import { createEventBridge } from "../src/event-bridge";
-import { calculateCost } from "@mariozechner/pi-ai";
+import { calculateCost } from "@earendil-works/pi-ai";
 
 // Helper: create a mock stream that captures pushed events
 function createMockStream() {

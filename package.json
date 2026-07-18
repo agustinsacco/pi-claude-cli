@@ -17,13 +17,15 @@
   },
   "license": "MIT",
   "peerDependencies": {
-    "@mariozechner/pi-ai": "^0.52.0",
-    "@mariozechner/pi-coding-agent": "^0.52.0"
+    "@earendil-works/pi-ai": "^0.80.0",
+    "@earendil-works/pi-coding-agent": "^0.80.0"
   },
   "dependencies": {
     "cross-spawn": "^7.0.6"
   },
   "devDependencies": {
+    "@earendil-works/pi-ai": "^0.80.0",
+    "@earendil-works/pi-coding-agent": "^0.80.0",
     "@eslint/js": "^9.39.4",
     "@types/cross-spawn": "^6.0.6",
     "@types/node": "^22.0.0",
