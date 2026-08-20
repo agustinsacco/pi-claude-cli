@@ -1,9 +1,12 @@
 name: Publish
+# Publishes when the version in package.json is new to npm. The normal flow
+# is: bump the version in a PR, merge to main, and this workflow publishes
+# and tags it. Tag pushes and manual dispatch also work; merges whose
+# version is already on npm are a green no-op.
 on:
   push:
+    branches: [main]
     tags: ["v*"]
-  # Manual publish from the Actions tab (publishes whatever version is in
-  # package.json on the selected ref). Tag pushes remain the canonical path.
   workflow_dispatch:
 
 jobs:
@@ -40,22 +43,31 @@ jobs:
             exit 1
           fi
 
-      - name: Refuse to republish an existing version
+      - name: Is this version new to npm?
+        id: version
         run: |
           PKG_NAME=$(node -p "require('./package.json').name")
           PKG_VERSION=$(node -p "require('./package.json').version")
+          echo "name=$PKG_NAME" >> "$GITHUB_OUTPUT"
+          echo "version=$PKG_VERSION" >> "$GITHUB_OUTPUT"
           if npm view "$PKG_NAME@$PKG_VERSION" version >/dev/null 2>&1; then
-            echo "::error::$PKG_NAME@$PKG_VERSION already exists on npm — bump the version first."
-            exit 1
+            echo "$PKG_NAME@$PKG_VERSION is already on npm — nothing to publish."
+            echo "new=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "new=true" >> "$GITHUB_OUTPUT"
           fi
 
       - run: npm run test
 
-      - run: npm publish --provenance --access public
+      - name: Publish to npm
+        if: steps.version.outputs.new == 'true'
+        run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - uses: softprops/action-gh-release@v2
-        if: github.ref_type == 'tag'
+      - name: Tag and create GitHub release
+        if: steps.version.outputs.new == 'true'
+        uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ steps.version.outputs.version }}
           generate_release_notes: true
