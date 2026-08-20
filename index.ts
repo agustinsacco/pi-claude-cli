@@ -6,6 +6,7 @@
  */
 
 import { getBuiltinModels as getModels } from "@earendil-works/pi-ai/providers/all";
+import { registerApiProvider } from "@earendil-works/pi-ai/compat";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { streamViaCli } from "./src/provider.js";
 import {
@@ -96,18 +97,35 @@ export default function (pi: ExtensionAPI) {
       }
     });
 
+    const streamFn = (
+      model: Parameters<typeof streamViaCli>[0],
+      context: Parameters<typeof streamViaCli>[1],
+      options?: Parameters<typeof streamViaCli>[2],
+    ) => {
+      const configPath = ensureMcpConfig(pi);
+      return streamViaCli(model, context, {
+        ...options,
+        mcpConfigPath: configPath,
+      });
+    };
+
+    // pi.registerProvider() feeds pi's provider composer, but pi 0.84's
+    // default stream fn (pi-agent-core setDefaultStreamFn) resolves
+    // model.api against pi-ai's global api registry instead — print mode
+    // and nested agent loops take that path and would throw
+    // "No API provider registered for api: pi-claude-cli" (#32).
+    // Register the custom api id there too.
+    registerApiProvider(
+      { api: PROVIDER_ID as any, stream: streamFn, streamSimple: streamFn },
+      PROVIDER_ID,
+    );
+
     pi.registerProvider(PROVIDER_ID, {
       baseUrl: "pi-claude-cli",
       apiKey: "unused",
       api: "pi-claude-cli",
       models,
-      streamSimple: (model, context, options) => {
-        const configPath = ensureMcpConfig(pi);
-        return streamViaCli(model, context, {
-          ...options,
-          mcpConfigPath: configPath,
-        });
-      },
+      streamSimple: streamFn,
     });
   } catch (err) {
     console.error(`[pi-claude-cli] Failed to register provider:`, err);
