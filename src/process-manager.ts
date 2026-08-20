@@ -193,7 +193,7 @@ export function validateCliPresence(): void {
   } catch {
     throw new Error(
       "Claude Code CLI not found. Install it: npm install -g @anthropic-ai/claude-code\n" +
-        "Then authenticate: claude auth login",
+        "Then authenticate by running `claude` and using `/login`.",
     );
   }
 }
@@ -202,17 +202,54 @@ export function validateCliPresence(): void {
  * Validate that the Claude CLI is authenticated.
  * Returns false and warns if not authenticated.
  *
+ * Claude Code 2.x emits machine-readable JSON on `auth status` when stdout
+ * is not a TTY, e.g. `{ "loggedIn": true, "authMethod": "claude.ai", ... }`.
+ * We parse it and trust `loggedIn` rather than relying solely on the exit
+ * code, because some transient warnings (e.g. token-refresh notices on
+ * stderr) can produce a non-zero exit even when the user is signed in.
+ *
+ * Older CLIs that don't emit JSON fall back to exit-code semantics.
+ *
  * @returns true if authenticated, false otherwise
  */
 export function validateCliAuth(): boolean {
+  let stdout: string | Buffer = "";
+  let exitCode: number | null = null;
   try {
-    execSync("claude auth status", { stdio: "pipe", timeout: 5000 });
-    return true;
-  } catch {
-    console.warn(
-      "[pi-claude-cli] Claude CLI is not authenticated. " +
-        "Run 'claude auth login' to authenticate.",
-    );
-    return false;
+    stdout = execSync("claude auth status", {
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 5000,
+      encoding: "utf8",
+    });
+    exitCode = 0;
+  } catch (err) {
+    const e = err as { status?: number | null; stdout?: Buffer | string };
+    exitCode = typeof e.status === "number" ? e.status : null;
+    stdout = e.stdout ?? "";
   }
+
+  const trimmed = (
+    typeof stdout === "string" ? stdout : stdout.toString()
+  ).trim();
+  if (trimmed.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(trimmed) as { loggedIn?: boolean };
+      if (parsed.loggedIn === true) return true;
+      warnUnauth();
+      return false;
+    } catch {
+      // fall through to exit-code semantics
+    }
+  }
+
+  if (exitCode === 0) return true;
+  warnUnauth();
+  return false;
+}
+
+function warnUnauth(): void {
+  console.warn(
+    "[pi-claude-cli] Claude CLI is not authenticated. " +
+      "Run `claude` and use `/login` to authenticate.",
+  );
 }

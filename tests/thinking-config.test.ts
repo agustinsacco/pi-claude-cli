@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { mapThinkingEffort, isOpusModel } from "../src/thinking-config";
-import type { ThinkingBudgets } from "@mariozechner/pi-ai";
+import type { ThinkingBudgets } from "@earendil-works/pi-ai";
 
 describe("isOpusModel", () => {
   it("returns true for claude-opus-4-6-20260301", () => {
@@ -17,6 +17,10 @@ describe("isOpusModel", () => {
 
   it("returns false for non-Opus model strings", () => {
     expect(isOpusModel("claude-haiku-3-5-20240307")).toBe(false);
+  });
+
+  it("returns false for Fable models (Mythos-class, not Opus)", () => {
+    expect(isOpusModel("claude-fable-5")).toBe(false);
   });
 });
 
@@ -54,8 +58,28 @@ describe("mapThinkingEffort", () => {
       expect(mapThinkingEffort("high", model, undefined)).toBe("high");
     });
 
-    it("maps xhigh to high (downgrade for non-Opus)", () => {
-      expect(mapThinkingEffort("xhigh", model, undefined)).toBe("high");
+    it("maps xhigh to xhigh (full ladder pass-through)", () => {
+      expect(mapThinkingEffort("xhigh", model, undefined)).toBe("xhigh");
+    });
+
+    it("maps max to max (full ladder pass-through)", () => {
+      expect(mapThinkingEffort("max", model, undefined)).toBe("max");
+    });
+  });
+
+  describe("Fable model mapping (standard, full ladder)", () => {
+    const model = "claude-fable-5";
+
+    it("maps high to high", () => {
+      expect(mapThinkingEffort("high", model, undefined)).toBe("high");
+    });
+
+    it("maps xhigh to xhigh", () => {
+      expect(mapThinkingEffort("xhigh", model, undefined)).toBe("xhigh");
+    });
+
+    it("maps max to max", () => {
+      expect(mapThinkingEffort("max", model, undefined)).toBe("max");
     });
   });
 
@@ -80,6 +104,10 @@ describe("mapThinkingEffort", () => {
 
     it("maps xhigh to max", () => {
       expect(mapThinkingEffort("xhigh", model, undefined)).toBe("max");
+    });
+
+    it("maps max to max", () => {
+      expect(mapThinkingEffort("max", model, undefined)).toBe("max");
     });
   });
 
@@ -134,8 +162,8 @@ describe("mapThinkingEffort", () => {
       expect(mapThinkingEffort("medium", undefined, undefined)).toBe("medium");
     });
 
-    it("does not return max for xhigh when modelId is undefined", () => {
-      expect(mapThinkingEffort("xhigh", undefined, undefined)).toBe("high");
+    it("maps xhigh to xhigh when modelId is undefined", () => {
+      expect(mapThinkingEffort("xhigh", undefined, undefined)).toBe("xhigh");
     });
   });
 });

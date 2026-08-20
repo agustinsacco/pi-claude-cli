@@ -16,10 +16,11 @@
 
 import { createInterface } from "node:readline";
 import {
-  AssistantMessageEventStream,
+  type AssistantMessageEventStream,
+  createAssistantMessageEventStream,
   type Model,
   type SimpleStreamOptions,
-} from "@mariozechner/pi-ai";
+} from "@earendil-works/pi-ai";
 import {
   buildPrompt,
   buildSystemPrompt,
@@ -70,9 +71,7 @@ export function streamViaCli(
   context: { messages: any[]; systemPrompt?: string },
   options?: StreamViaCLiOptions,
 ): AssistantMessageEventStream {
-  // @ts-expect-error — tsc can't verify AssistantMessageEventStream is a value
-  // through pi-ai's `export *` re-export chain. The class constructor exists at runtime.
-  const stream = new AssistantMessageEventStream();
+  const stream = createAssistantMessageEventStream();
 
   (async () => {
     let proc: ReturnType<typeof spawnClaude> | undefined;
@@ -81,13 +80,21 @@ export function streamViaCli(
     try {
       const cwd = options?.cwd ?? process.cwd();
 
-      // Resume if pi provides a session ID AND this isn't the first turn.
-      // Pi passes sessionId on every call (including first), but we can only
-      // --resume a CLI session that already exists on disk from a prior turn.
+      // Resume only when this conversation already contains a prior assistant
+      // turn produced by pi-claude-cli (which means a CLI session has been
+      // established under this session id). Otherwise — e.g. when the user
+      // just switched to pi-claude-cli from another provider mid session, or
+      // when this is the first turn — start a fresh CLI session via
+      // --session-id. Using --resume against an unknown id fails silently
+      // with "No conversation found with session ID" and produces an empty
+      // assistant message.
+      const hasPriorCliTurn = (context.messages as any[]).some(
+        (m) =>
+          m?.role === "assistant" &&
+          (m?.provider === "pi-claude-cli" || m?.api === "pi-claude-cli"),
+      );
       const resumeSessionId =
-        options?.sessionId && context.messages.length > 1
-          ? options.sessionId
-          : undefined;
+        options?.sessionId && hasPriorCliTurn ? options.sessionId : undefined;
 
       // Build prompt: if resuming, only send the latest user turn;
       // otherwise build the full flattened conversation history
@@ -271,8 +278,23 @@ export function streamViaCli(
         } else if (msg.type === "control_request") {
           handleControlRequest(msg, proc!.stdin!);
         } else if (msg.type === "result") {
-          if (msg.subtype === "error") {
-            endStreamWithError(msg.error ?? "Unknown error from Claude CLI");
+          // Surface every non-success result as an error so silent failures
+          // (e.g. subtype "error_during_execution" from --resume against an
+          // unknown session id, or any future error variant) don't get
+          // swallowed into an empty assistant message.
+          const r: any = msg as any;
+          const isError =
+            r.subtype !== "success" ||
+            r.is_error === true ||
+            typeof r.error === "string" ||
+            (Array.isArray(r.errors) && r.errors.length > 0);
+          if (isError) {
+            const errMsg =
+              r.error ??
+              (Array.isArray(r.errors) && r.errors.length > 0
+                ? r.errors.join("; ")
+                : `Claude CLI returned ${r.subtype ?? "non-success result"}`);
+            endStreamWithError(errMsg);
           }
           // For both success and error: clean up the subprocess
           clearTimeout(inactivityTimer);

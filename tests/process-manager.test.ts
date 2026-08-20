@@ -338,12 +338,34 @@ describe("validateCliPresence", () => {
 });
 
 describe("validateCliAuth", () => {
-  it("returns true when claude auth status succeeds", () => {
-    (execSync as any).mockReturnValue(Buffer.from("Logged in"));
+  it("returns true when claude auth status succeeds with non-JSON output", () => {
+    (execSync as any).mockReturnValue("Logged in");
     expect(validateCliAuth()).toBe(true);
   });
 
-  it("returns false and warns when claude auth status fails", () => {
+  it("returns true when JSON output reports loggedIn:true even if exit is non-zero", () => {
+    // Simulate a transient warning that flips the exit code but still
+    // produces valid JSON on stdout.
+    (execSync as any).mockImplementation(() => {
+      const err: any = new Error("warning on stderr");
+      err.status = 1;
+      err.stdout = '{"loggedIn":true,"authMethod":"claude.ai"}';
+      throw err;
+    });
+    expect(validateCliAuth()).toBe(true);
+  });
+
+  it("returns false and warns when JSON output reports loggedIn:false", () => {
+    (execSync as any).mockReturnValue('{"loggedIn":false}');
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(validateCliAuth()).toBe(false);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("not authenticated"),
+    );
+    warnSpy.mockRestore();
+  });
+
+  it("returns false and warns when claude auth status fails with no JSON", () => {
     (execSync as any).mockImplementation(() => {
       throw new Error("not authenticated");
     });

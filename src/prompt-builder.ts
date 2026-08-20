@@ -29,7 +29,7 @@ type AnthropicContentBlock =
       source: { type: "base64"; media_type: string; data: string };
     };
 
-// We use `any` for Context to avoid requiring @mariozechner/pi-ai at dev time.
+// We use `any` for Context to avoid requiring @earendil-works/pi-ai at dev time.
 // At runtime, pi provides the real Context type.
 
 /**

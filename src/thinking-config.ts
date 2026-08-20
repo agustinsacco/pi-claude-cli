@@ -1,33 +1,36 @@
 /**
  * Thinking effort configuration for mapping pi's ThinkingLevel to Claude CLI --effort flags.
  *
- * Maps pi's reasoning levels (minimal/low/medium/high/xhigh) to the CLI's effort
- * levels (low/medium/high/max). Opus models get an elevated mapping where medium
- * becomes high and high becomes max, leveraging their superior reasoning capability.
+ * Maps pi's reasoning levels (minimal/low/medium/high/xhigh/max) to the CLI's effort
+ * levels (low/medium/high/xhigh/max). Opus models keep the elevated mapping where
+ * medium becomes high and high becomes max; all other models pass through 1:1.
  *
  * IMPORTANT: The CLI does NOT support --thinking-budget. Only --effort is supported.
  */
 
-import type { ThinkingLevel, ThinkingBudgets } from "@mariozechner/pi-ai";
+import type { ThinkingLevel, ThinkingBudgets } from "@earendil-works/pi-ai";
 
 /** CLI effort levels accepted by the --effort flag */
-export type CliEffortLevel = "low" | "medium" | "high" | "max";
+export type CliEffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
 
 /**
  * Standard model mapping: pi ThinkingLevel -> CLI effort.
- * Non-Opus models never receive "max" (would cause CLI error).
+ * The CLI accepts the full ladder (low/medium/high/xhigh/max) for current
+ * models (verified with claude-fable-5 and claude-sonnet-5 on claude CLI
+ * 2.x), so levels pass through 1:1 instead of capping at high.
  */
 const STANDARD_EFFORT_MAP: Record<ThinkingLevel, CliEffortLevel> = {
   minimal: "low",
   low: "low",
   medium: "medium",
   high: "high",
-  xhigh: "high", // non-Opus: silently downgrade (max not supported)
+  xhigh: "xhigh",
+  max: "max",
 };
 
 /**
  * Opus model mapping: shifted up for elevated reasoning.
- * Opus models get max capability at high/xhigh levels.
+ * Opus models get max capability at high/xhigh/max levels.
  */
 const OPUS_EFFORT_MAP: Record<ThinkingLevel, CliEffortLevel> = {
   minimal: "low",
@@ -35,6 +38,7 @@ const OPUS_EFFORT_MAP: Record<ThinkingLevel, CliEffortLevel> = {
   medium: "high", // shifted: standard high
   high: "max", // shifted: maximum capability
   xhigh: "max", // Opus gets max
+  max: "max",
 };
 
 /**
