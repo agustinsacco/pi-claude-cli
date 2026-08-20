@@ -2,6 +2,9 @@ name: Publish
 on:
   push:
     tags: ["v*"]
+  # Manual publish from the Actions tab (publishes whatever version is in
+  # package.json on the selected ref). Tag pushes remain the canonical path.
+  workflow_dispatch:
 
 jobs:
   publish:
@@ -15,14 +18,34 @@ jobs:
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
+
+      - name: Require NPM_TOKEN secret
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::error::NPM_TOKEN repo secret is not set. Add a granular npm automation token (read/write on @saccolabs) under Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+
       - run: npm ci
 
-      - name: Validate version match
+      - name: Validate version match (tag pushes)
+        if: github.ref_type == 'tag'
         run: |
           TAG_VERSION="${GITHUB_REF#refs/tags/v}"
           PKG_VERSION=$(node -p "require('./package.json').version")
           if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
             echo "::error::Tag version ($TAG_VERSION) does not match package.json version ($PKG_VERSION)"
+            exit 1
+          fi
+
+      - name: Refuse to republish an existing version
+        run: |
+          PKG_NAME=$(node -p "require('./package.json').name")
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if npm view "$PKG_NAME@$PKG_VERSION" version >/dev/null 2>&1; then
+            echo "::error::$PKG_NAME@$PKG_VERSION already exists on npm — bump the version first."
             exit 1
           fi
 
@@ -33,5 +56,6 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - uses: softprops/action-gh-release@v2
+        if: github.ref_type == 'tag'
         with:
           generate_release_notes: true

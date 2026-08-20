@@ -4,6 +4,7 @@ on:
     branches: [main, "port/**"]
   pull_request:
     branches: [main]
+  workflow_dispatch:
   schedule:
     # Weekly canary against pi@latest — pi's API surface has broken this
     # extension twice (package rescope, api-registry split). Catch it early.
