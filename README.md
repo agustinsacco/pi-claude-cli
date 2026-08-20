@@ -22,15 +22,21 @@ The extension registers as a custom pi provider exposing all Claude models. Each
 
 ## Installation
 
-Add to `~/.gsd/agent/settings.json`:
+```bash
+pi install npm:@saccolabs/pi-claude-cli
+```
+
+Or declare it in `~/.pi/agent/settings.json` (global) or `.pi/settings.json` (project):
 
 ```json
 {
-  "packages": ["npm:pi-claude-cli"]
+  "packages": ["npm:@saccolabs/pi-claude-cli"]
 }
 ```
 
 Then select a Claude model via `/model` in the interactive UI. All Claude models appear under the `pi-claude-cli` provider.
+
+Requires the `claude` binary on your login-shell PATH (`npm install -g @anthropic-ai/claude-code`), authenticated with your Claude Pro/Max account.
 
 ## Features
 

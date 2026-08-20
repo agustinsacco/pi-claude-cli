@@ -1,9 +1,13 @@
 name: CI
 on:
   push:
-    branches: [main]
+    branches: [main, "port/**"]
   pull_request:
     branches: [main]
+  schedule:
+    # Weekly canary against pi@latest — pi's API surface has broken this
+    # extension twice (package rescope, api-registry split). Catch it early.
+    - cron: "17 6 * * 1"
 
 jobs:
   lint:
@@ -39,3 +43,21 @@ jobs:
           node-version: "22"
       - run: npm ci
       - run: npm run test:coverage
+
+  e2e-stub:
+    # Full pipeline through a real pi binary with the deterministic Claude
+    # CLI stub (tests/e2e/claude-stub.cjs) — no credentials needed.
+    strategy:
+      fail-fast: false
+      matrix:
+        pi-version: ["0.84.2", "latest"]
+    continue-on-error: ${{ matrix.pi-version == 'latest' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+      - run: npm ci
+      - run: npm install -g "@earendil-works/pi-coding-agent@${{ matrix.pi-version }}"
+      - run: npm run test:e2e
