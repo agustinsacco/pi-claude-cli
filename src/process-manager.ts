@@ -21,6 +21,12 @@ import type { ChildProcess } from "node:child_process";
  * @param options - Optional cwd, AbortSignal, and effort level
  * @returns The spawned ChildProcess with piped stdin/stdout/stderr
  */
+/** Truthy PI_CLAUDE_CLI_HERMETIC opts in to hermetic mode (see README). */
+function isHermetic(): boolean {
+  const value = (process.env.PI_CLAUDE_CLI_HERMETIC ?? "").toLowerCase();
+  return value === "1" || value === "true" || value === "yes";
+}
+
 export function spawnClaude(
   modelId: string,
   systemPrompt?: string,
@@ -46,6 +52,16 @@ export function spawnClaude(
     "--permission-prompt-tool",
     "stdio",
   ];
+
+  // Hermetic mode: keep the user's Claude Code environment out of pi turns.
+  // --strict-mcp-config loads ONLY the servers from --mcp-config (our
+  // schema-only custom-tools server survives; personal/project MCP servers
+  // do not), and an empty --setting-sources skips user/project/local
+  // settings — hooks, CLAUDE.md auto-memory, permission allowlists.
+  // Both flags verified accepted on claude 2.1.237.
+  if (isHermetic()) {
+    args.push("--strict-mcp-config", "--setting-sources", "");
+  }
 
   if (options?.resumeSessionId) {
     // Resume an existing session — CLI loads prior conversation from disk

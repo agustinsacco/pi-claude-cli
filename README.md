@@ -49,6 +49,32 @@ Requires the `claude` binary on your login-shell PATH (`npm install -g @anthropi
 - Cross-platform subprocess management (Windows, macOS, Linux)
 - Inactivity timeout and process registry for cleanup
 
+## What your Claude environment contributes
+
+Each turn runs a real `claude -p` subprocess in your workspace, so your
+Claude Code environment participates through three doors:
+
+1. **Bridged tools** — the six built-ins (Read/Write/Edit/Bash/Grep/Glob)
+   and pi custom tools become pi tool calls; pi executes them.
+2. **CLI-side execution** — your personal/project MCP servers, WebSearch,
+   and sub-agents run _inside_ the CLI between cycles. They appear in the
+   transcript as one-line markers (`[Claude Code · WebSearch {…}]`) and
+   bill your plan.
+3. **Prompt-level osmosis** — the CLI auto-loads project CLAUDE.md and
+   memory, your hooks fire, and skills can load twice (natively via
+   claude, and again via pi's own `~/.claude/skills` support).
+
+### Hermetic mode
+
+Set `PI_CLAUDE_CLI_HERMETIC=1` to keep that environment out of pi turns:
+the subprocess runs with `--strict-mcp-config` (only this extension's
+schema-only custom-tools server loads) and an empty `--setting-sources`
+(no user/project/local settings — hooks, auto-memory, permission
+allowlists). Model access and your subscription login are unaffected.
+
+Related knobs: `PI_CLAUDE_CLI_TIMEOUT_MS` overrides the 300s inactivity
+timeout (CLI-side tools can be silent on stdout for minutes).
+
 ## License
 
 MIT

@@ -639,3 +639,35 @@ describe("cleanupSystemPromptFile", () => {
     expect(() => cleanupSystemPromptFile()).not.toThrow();
   });
 });
+
+describe("hermetic mode (issue #5)", () => {
+  const originalEnv = process.env.PI_CLAUDE_CLI_HERMETIC;
+
+  afterEach(() => {
+    if (originalEnv === undefined) delete process.env.PI_CLAUDE_CLI_HERMETIC;
+    else process.env.PI_CLAUDE_CLI_HERMETIC = originalEnv;
+  });
+
+  it("adds --strict-mcp-config and empty --setting-sources when enabled", () => {
+    process.env.PI_CLAUDE_CLI_HERMETIC = "1";
+    spawnClaude("claude-haiku-4-5", undefined, {});
+    const args = (spawn as any).mock.calls.at(-1)[1] as string[];
+    expect(args).toContain("--strict-mcp-config");
+    const idx = args.indexOf("--setting-sources");
+    expect(idx).toBeGreaterThan(-1);
+    expect(args[idx + 1]).toBe("");
+  });
+
+  it("keeps the default environment when disabled or unset", () => {
+    delete process.env.PI_CLAUDE_CLI_HERMETIC;
+    spawnClaude("claude-haiku-4-5", undefined, {});
+    let args = (spawn as any).mock.calls.at(-1)[1] as string[];
+    expect(args).not.toContain("--strict-mcp-config");
+    expect(args).not.toContain("--setting-sources");
+
+    process.env.PI_CLAUDE_CLI_HERMETIC = "0";
+    spawnClaude("claude-haiku-4-5", undefined, {});
+    args = (spawn as any).mock.calls.at(-1)[1] as string[];
+    expect(args).not.toContain("--strict-mcp-config");
+  });
+});
