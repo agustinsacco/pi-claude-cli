@@ -28,6 +28,8 @@ interface TrackedToolBlock {
   type: "tool_use";
   index: number;
   cycle: number;
+  /** Position in output.content, or -1 when not materialized. */
+  contentIndex: number;
   id: string;
   name: string; // Already mapped to pi name
   claudeName: string; // Original Claude name for arg translation
@@ -152,20 +154,18 @@ export function createEventBridge(
   }
 
   /**
-   * Append a complete text block through proper pi stream events.
-   *
-   * `blocks` and `output.content` are parallel arrays (SSE handlers index
-   * into both with the same idx), so the marker must occupy a slot in both;
-   * cycle -1 / index -1 can never match a real SSE event.
+   * Append a complete text block through proper pi stream events. Tracked
+   * blocks carry their own contentIndex, so appended blocks (markers, the
+   * final-answer safety net) need no relationship to any SSE index.
    */
   function appendTextBlock(text: string): void {
     if (!started) {
       stream.push({ type: "start", partial: output });
       started = true;
     }
-    blocks.push({ type: "text", text, index: -1, cycle: -1 });
+    const contentIndex = output.content.length;
+    blocks.push({ type: "text", text, index: -1, cycle: -1, contentIndex });
     output.content.push({ type: "text" as const, text: "" });
-    const contentIndex = output.content.length - 1;
     stream.push({ type: "text_start", contentIndex, partial: output });
     (output.content[contentIndex] as TextContent).text = text;
     stream.push({
@@ -238,34 +238,32 @@ export function createEventBridge(
         text: "",
         index: event.index ?? 0,
         cycle,
+        contentIndex: output.content.length,
       };
       blocks.push(block);
       output.content.push({ type: "text" as const, text: "" });
 
       stream.push({
         type: "text_start",
-        contentIndex: output.content.length - 1,
+        contentIndex: block.contentIndex,
         partial: output,
       });
     } else if (blockType === "thinking") {
+      // Deliberately NOT materialized yet. Several Claude models (verified:
+      // fable-5, opus-5, sonnet-5 at effort medium; haiku-4-5 is the
+      // exception) stream ENCRYPTED thinking: a multi-kilobyte
+      // signature_delta with no thinking_delta at all. Materializing on
+      // start produced a thinking block with no text, which front-ends
+      // faithfully rendered as an empty "thought". The block is created on
+      // the first plaintext delta and dropped at block_stop if none arrives.
       const block: TrackedContentBlock = {
         type: "thinking",
         text: "",
         index: event.index ?? 0,
         cycle,
+        contentIndex: -1,
       };
       blocks.push(block);
-      output.content.push({
-        type: "thinking" as const,
-        thinking: "",
-        thinkingSignature: "",
-      });
-
-      stream.push({
-        type: "thinking_start",
-        contentIndex: output.content.length - 1,
-        partial: output,
-      });
     } else if (blockType === "tool_use") {
       const claudeName = event.content_block!.name!;
 
@@ -282,6 +280,7 @@ export function createEventBridge(
         type: "tool_use",
         index: event.index ?? 0,
         cycle,
+        contentIndex: output.content.length,
         id,
         name: piName,
         claudeName,
@@ -298,101 +297,112 @@ export function createEventBridge(
 
       stream.push({
         type: "toolcall_start",
-        contentIndex: output.content.length - 1,
+        contentIndex: block.contentIndex,
         partial: output,
       });
     }
     // Unknown block types silently ignored
   }
 
+  /** Locate the tracked block for this cycle's SSE index. */
+  function trackedFor(event: ClaudeApiEvent): TrackedBlock | undefined {
+    const idx = blocks.findIndex(
+      (b) => b.cycle === cycle && b.index === event.index,
+    );
+    return idx === -1 ? undefined : blocks[idx];
+  }
+
+  /**
+   * Create the pi content block for a thinking block that has now proven it
+   * carries plaintext. Encrypted thinking never reaches this path, so it
+   * never becomes an empty "thought" downstream.
+   */
+  function materializeThinking(block: TrackedContentBlock): void {
+    block.contentIndex = output.content.length;
+    output.content.push({
+      type: "thinking" as const,
+      thinking: "",
+      thinkingSignature: block.pendingSignature ?? "",
+    });
+    block.pendingSignature = undefined;
+    stream.push({
+      type: "thinking_start",
+      contentIndex: block.contentIndex,
+      partial: output,
+    });
+  }
+
   function handleContentBlockDelta(event: ClaudeApiEvent): void {
     const deltaType = event.delta?.type;
+    const block = trackedFor(event);
+    if (!block) return;
 
     if (deltaType === "text_delta" && event.delta!.text != null) {
-      const idx = blocks.findIndex(
-        (b) => b.cycle === cycle && b.index === event.index,
-      );
-      if (idx === -1) return;
-
-      const block = blocks[idx];
-      if (block.type === "text") {
-        block.text += event.delta!.text;
-        const contentBlock = output.content[idx] as TextContent;
-        contentBlock.text = block.text;
-
-        stream.push({
-          type: "text_delta",
-          contentIndex: idx,
-          delta: event.delta!.text,
-          partial: output,
-        });
-      }
+      if (block.type !== "text") return;
+      block.text += event.delta!.text;
+      (output.content[block.contentIndex] as TextContent).text = block.text;
+      stream.push({
+        type: "text_delta",
+        contentIndex: block.contentIndex,
+        delta: event.delta!.text,
+        partial: output,
+      });
     } else if (
       deltaType === "thinking_delta" &&
       event.delta!.thinking != null
     ) {
-      const idx = blocks.findIndex(
-        (b) => b.cycle === cycle && b.index === event.index,
-      );
-      if (idx === -1) return;
-
-      const block = blocks[idx];
-      if (block.type === "thinking") {
-        block.text += event.delta!.thinking;
-        const contentBlock = output.content[idx] as ThinkingContent;
-        contentBlock.thinking = block.text;
-
-        stream.push({
-          type: "thinking_delta",
-          contentIndex: idx,
-          delta: event.delta!.thinking,
-          partial: output,
-        });
+      if (block.type !== "thinking") return;
+      // Empty thinking_delta events accompany encrypted thinking (verified
+      // on sonnet-5): they carry no plaintext, so they must not bring a
+      // thinking block into existence.
+      if (block.contentIndex === -1) {
+        if (event.delta!.thinking.length === 0) return;
+        materializeThinking(block);
       }
+      block.text += event.delta!.thinking;
+      (output.content[block.contentIndex] as ThinkingContent).thinking =
+        block.text;
+      stream.push({
+        type: "thinking_delta",
+        contentIndex: block.contentIndex,
+        delta: event.delta!.thinking,
+        partial: output,
+      });
     } else if (
       deltaType === "input_json_delta" &&
       event.delta!.partial_json != null
     ) {
-      const idx = blocks.findIndex(
-        (b) => b.cycle === cycle && b.index === event.index,
-      );
-      if (idx === -1) return;
-
-      const block = blocks[idx];
-      if (block.type === "tool_use") {
-        block.partialJson += event.delta!.partial_json;
-
-        // Try to parse accumulated JSON -- on success update args, on failure keep previous
-        try {
-          block.arguments = JSON.parse(block.partialJson);
-          (output.content[idx] as any).arguments = block.arguments;
-        } catch {
-          // Partial JSON not yet parseable -- keep previous arguments
-        }
-
-        stream.push({
-          type: "toolcall_delta",
-          contentIndex: idx,
-          delta: event.delta!.partial_json,
-          partial: output,
-        });
+      if (block.type !== "tool_use") return;
+      block.partialJson += event.delta!.partial_json;
+      try {
+        block.arguments = JSON.parse(block.partialJson);
+        (output.content[block.contentIndex] as any).arguments = block.arguments;
+      } catch {
+        // Partial JSON not yet parseable -- keep previous arguments
       }
+      stream.push({
+        type: "toolcall_delta",
+        contentIndex: block.contentIndex,
+        delta: event.delta!.partial_json,
+        partial: output,
+      });
     } else if (
       deltaType === "signature_delta" &&
       event.delta!.signature != null
     ) {
-      // Accumulate signature on the thinking block
-      const idx = blocks.findIndex(
-        (b) => b.cycle === cycle && b.index === event.index,
-      );
-      if (idx === -1) return;
-
-      const block = blocks[idx];
-      if (block.type === "thinking") {
-        const contentBlock = output.content[idx] as ThinkingContent;
-        contentBlock.thinkingSignature =
-          (contentBlock.thinkingSignature || "") + event.delta!.signature;
+      if (block.type !== "thinking") return;
+      if (block.contentIndex === -1) {
+        // Signature before (or without) any plaintext: hold it in case
+        // plaintext follows. If it never does, the block is dropped.
+        block.pendingSignature =
+          (block.pendingSignature ?? "") + event.delta!.signature;
+        return;
       }
+      const contentBlock = output.content[
+        block.contentIndex
+      ] as ThinkingContent;
+      contentBlock.thinkingSignature =
+        (contentBlock.thinkingSignature || "") + event.delta!.signature;
     }
   }
 
@@ -401,22 +411,29 @@ export function createEventBridge(
       (b) => b.cycle === cycle && b.index === event.index,
     );
     if (idx === -1) return;
-
     const block = blocks[idx];
+
+    // Encrypted thinking: signature only, no plaintext. Drop it rather than
+    // emit a content block with nothing to show.
+    if (block.type === "thinking" && block.contentIndex === -1) {
+      blocks.splice(idx, 1);
+      return;
+    }
+
     // Clean up the tracking index from the block (no longer needed)
     delete (block as any).index;
 
     if (block.type === "text") {
       stream.push({
         type: "text_end",
-        contentIndex: idx,
+        contentIndex: block.contentIndex,
         content: block.text,
         partial: output,
       });
     } else if (block.type === "thinking") {
       stream.push({
         type: "thinking_end",
-        contentIndex: idx,
+        contentIndex: block.contentIndex,
         content: block.text,
         partial: output,
       });
@@ -430,9 +447,7 @@ export function createEventBridge(
         finalArgs = block.partialJson;
       }
 
-      // Update output.content with final arguments
-      const contentBlock = output.content[idx] as ToolCall;
-      (contentBlock as any).arguments = finalArgs;
+      (output.content[block.contentIndex] as any).arguments = finalArgs;
 
       // ToolCall.arguments is typed as Record<string, any> in pi-ai, but we
       // intentionally emit a raw string when JSON parse fails completely.
@@ -446,7 +461,7 @@ export function createEventBridge(
 
       stream.push({
         type: "toolcall_end",
-        contentIndex: idx,
+        contentIndex: block.contentIndex,
         toolCall,
         partial: output,
       });
@@ -502,6 +517,17 @@ export function createEventBridge(
       } catch {
         /* unserializable input — marker still names the tool */
       }
+      // WIRE CONTRACT — front-ends parse this string.
+      //
+      //   [Claude Code · <ToolName>]              (no arguments)
+      //   [Claude Code · <ToolName> <argsJson>]   (preview, may be truncated)
+      //
+      // pidex matches /^\[Claude Code · ([^\s\]]+)(?:\s+([\s\S]*))?\]$/ to
+      // render these as activity rows instead of prose; anything it cannot
+      // match falls back to being shown as raw markdown, which is what this
+      // marker existed to avoid. Change the shape only together with the
+      // consumers, and keep the argument preview opaque — it is truncated
+      // here, so it is frequently invalid JSON and must never be parsed.
       appendTextBlock(`[Claude Code · ${block.name}${argsPreview}]`);
     }
   }

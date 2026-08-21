@@ -123,6 +123,34 @@ happened:
 [Claude Code · WebSearch {"query":"news headline today 2026"}]
 ```
 
+### The marker is a wire contract
+
+Front-ends parse the marker string, so its shape is API:
+
+```
+[Claude Code · <ToolName>]              # no arguments
+[Claude Code · <ToolName> <argsJson>]   # preview, truncated at ~120 chars
+```
+
+pidex renders matches as activity rows and anything else as markdown prose,
+so a format change that looks cosmetic here degrades rendering there. The
+argument preview is deliberately opaque: truncation makes it invalid JSON
+often enough that consumers must treat it as a display string.
+
+### Not yet surfaced (extension seams)
+
+Two things the CLI reports that this bridge deliberately drops. Both are the
+natural starting points if a front-end ever wants richer Claude-Code-side UX:
+
+- **Results of CLI-side tools.** The `user` envelopes between cycles carry
+  `tool_result` blocks for tools the CLI executed itself. `provider.ts`
+  ignores them, so markers show _what was invoked_ but never what came back.
+  Surfacing them means pairing each result with its `tool_use_id`.
+- **Sub-agent activity.** Everything with `parent_tool_use_id` set (the
+  CLI's own `Task` agents) is filtered out in both `provider.ts` and
+  `handleAssistantEnvelope`. Those events carry a full nested episode; a
+  front-end that wanted a sub-agent tree would consume them there.
+
 ### Enforcement is belt-and-suspenders
 
 The belt is `control-handler.ts`: custom-tools requests get
