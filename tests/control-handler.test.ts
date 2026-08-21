@@ -124,7 +124,8 @@ describe("control-handler", () => {
       handleControlRequest(msg, stream);
 
       const response = JSON.parse(chunks[0].trim());
-      expect(response.request_id).toBe("custom-req-id-42");
+      // 2.x wire shape: request_id nested inside response for correlation.
+      expect(response.response.request_id).toBe("custom-req-id-42");
     });
 
     it("writes response as NDJSON (JSON + newline)", () => {
