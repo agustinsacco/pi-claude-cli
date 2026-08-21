@@ -49,6 +49,12 @@ Requires the `claude` binary on your login-shell PATH (`npm install -g @anthropi
 - Cross-platform subprocess management (Windows, macOS, Linux)
 - Inactivity timeout and process registry for cleanup
 
+## Architecture
+
+`docs/ARCHITECTURE.md` covers the turn lifecycle, the three-way tool split,
+the two-ledger session model, error recovery, and the CLI compatibility
+notes (including the 2.x control-protocol shape).
+
 ## What your Claude environment contributes
 
 Each turn runs a real `claude -p` subprocess in your workspace, so your
