@@ -128,4 +128,8 @@ export interface TrackedContentBlock {
   text: string;
   index: number; // Claude's content_block index (resets each cycle)
   cycle: number; // Which API call of the episode this block belongs to
+  /** Position in output.content, or -1 while not materialized. */
+  contentIndex: number;
+  /** signature_delta received before any plaintext (encrypted thinking). */
+  pendingSignature?: string;
 }

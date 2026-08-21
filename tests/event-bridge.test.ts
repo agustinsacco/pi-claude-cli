@@ -695,7 +695,7 @@ describe("createEventBridge", () => {
   });
 
   describe("thinking and other content block types", () => {
-    it("emits thinking_start for thinking blocks", () => {
+    it("defers thinking_start until plaintext actually arrives", () => {
       const bridge = createBridgeWithStart();
 
       bridge.handleEvent({
@@ -704,11 +704,140 @@ describe("createEventBridge", () => {
         content_block: { type: "thinking" },
       });
 
+      // Encrypted thinking sends a signature with no plaintext; nothing is
+      // materialized yet, so no thinking_start.
+      expect(stream.push).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: "thinking_start" }),
+      );
+
+      bridge.handleEvent({
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "thinking_delta", thinking: "reasoning" },
+      });
+
       expect(stream.push).toHaveBeenCalledWith(
         expect.objectContaining({
           type: "thinking_start",
           contentIndex: 0,
         }),
+      );
+    });
+
+    it("ignores empty thinking_delta events (encrypted thinking)", () => {
+      const bridge = createBridgeWithStart();
+
+      bridge.handleEvent({
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "thinking" },
+      });
+      // Verified live on sonnet-5: empty-string deltas accompany the
+      // signature and must not materialize a block.
+      bridge.handleEvent({
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "thinking_delta", thinking: "" },
+      });
+      bridge.handleEvent({
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "signature_delta", signature: "s".repeat(392) },
+      });
+      bridge.handleEvent({ type: "content_block_stop", index: 0 });
+
+      expect(bridge.getOutput().content).toHaveLength(0);
+      expect(stream.push).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: "thinking_start" }),
+      );
+    });
+
+    it("drops encrypted thinking blocks (signature, no plaintext)", () => {
+      const bridge = createBridgeWithStart();
+
+      bridge.handleEvent({
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "thinking" },
+      });
+      bridge.handleEvent({
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "signature_delta", signature: "x".repeat(3096) },
+      });
+      bridge.handleEvent({ type: "content_block_stop", index: 0 });
+
+      // Nothing rendered: no thinking events, no empty content block.
+      expect(stream.push).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: "thinking_start" }),
+      );
+      expect(stream.push).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: "thinking_end" }),
+      );
+      expect(bridge.getOutput().content).toHaveLength(0);
+    });
+
+    it("keeps a signature that arrives before the plaintext it belongs to", () => {
+      const bridge = createBridgeWithStart();
+
+      bridge.handleEvent({
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "thinking" },
+      });
+      bridge.handleEvent({
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "signature_delta", signature: "sig-" },
+      });
+      bridge.handleEvent({
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "thinking_delta", thinking: "real reasoning" },
+      });
+      bridge.handleEvent({ type: "content_block_stop", index: 0 });
+
+      const [block] = bridge.getOutput().content as any[];
+      expect(block.type).toBe("thinking");
+      expect(block.thinking).toBe("real reasoning");
+      expect(block.thinkingSignature).toBe("sig-");
+    });
+
+    it("keeps content indexes correct when a dropped block precedes real ones", () => {
+      const bridge = createBridgeWithStart();
+
+      // Encrypted thinking at index 0 …
+      bridge.handleEvent({
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "thinking" },
+      });
+      bridge.handleEvent({
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "signature_delta", signature: "sig" },
+      });
+      bridge.handleEvent({ type: "content_block_stop", index: 0 });
+
+      // … followed by real text at index 1.
+      bridge.handleEvent({
+        type: "content_block_start",
+        index: 1,
+        content_block: { type: "text", text: "" },
+      });
+      bridge.handleEvent({
+        type: "content_block_delta",
+        index: 1,
+        delta: { type: "text_delta", text: "answer" },
+      });
+      bridge.handleEvent({ type: "content_block_stop", index: 1 });
+
+      const content = bridge.getOutput().content as any[];
+      expect(content).toHaveLength(1);
+      expect(content[0]).toMatchObject({ type: "text", text: "answer" });
+      // The text block owns content index 0, not 1.
+      expect(stream.push).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "text_end", contentIndex: 0 }),
       );
     });
 
