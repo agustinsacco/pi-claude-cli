@@ -15,6 +15,7 @@ import {
   killAllProcesses,
 } from "./src/process-manager.js";
 import { getCustomToolDefs, writeMcpConfig } from "./src/mcp-config.js";
+import { rewriteOverflowMessage } from "./src/overflow.js";
 
 // Kill all active Claude subprocesses on process exit to prevent orphans
 process.on("exit", killAllProcesses);
@@ -119,6 +120,13 @@ export default function (pi: ExtensionAPI) {
       { api: PROVIDER_ID as any, stream: streamFn, streamSimple: streamFn },
       PROVIDER_ID,
     );
+
+    // Overflow recovery: rewrite provider-scoped context-limit errors to
+    // the prefix pi's auto-compaction recognizes (see src/overflow.ts).
+
+    (pi.on as any)("message_end", (event: any, ctx: any) => {
+      return rewriteOverflowMessage(event?.message ?? {}, ctx?.model?.provider);
+    });
 
     pi.registerProvider(PROVIDER_ID, {
       baseUrl: "pi-claude-cli",
