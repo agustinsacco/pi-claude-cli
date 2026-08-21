@@ -81,9 +81,20 @@ export function streamViaCli(
 ): AssistantMessageEventStream {
   const stream = createAssistantMessageEventStream();
 
-  (async () => {
+  /**
+   * One subprocess attempt. Returns "resume-miss" (without touching the
+   * stream) when a --resume pointed at a CLI session that does not exist —
+   * forks copy pi history into a NEW session id, so the prior-provider-turn
+   * heuristic says resume while the CLI cache is keyed to the old id (#2).
+   * The driver below retries once with a full-history replay, which also
+   * re-registers the CLI cache under the current session id.
+   */
+  async function runOnce(
+    forceFullReplay: boolean,
+  ): Promise<"ok" | "resume-miss"> {
     let proc: ReturnType<typeof spawnClaude> | undefined;
     let abortHandler: (() => void) | undefined;
+    let resumeMiss = false;
 
     try {
       const cwd = options?.cwd ?? process.cwd();
@@ -102,7 +113,9 @@ export function streamViaCli(
           (m?.provider === "pi-claude-cli" || m?.api === "pi-claude-cli"),
       );
       const resumeSessionId =
-        options?.sessionId && hasPriorCliTurn ? options.sessionId : undefined;
+        !forceFullReplay && options?.sessionId && hasPriorCliTurn
+          ? options.sessionId
+          : undefined;
 
       // Build prompt: if resuming, only send the latest user turn;
       // otherwise build the full flattened conversation history
@@ -195,7 +208,7 @@ export function streamViaCli(
 
         if (options.signal.aborted) {
           abortHandler();
-          return;
+          return "ok";
         }
         options.signal.addEventListener("abort", abortHandler, { once: true });
       }
@@ -308,7 +321,18 @@ export function streamViaCli(
               (Array.isArray(r.errors) && r.errors.length > 0
                 ? r.errors.join("; ")
                 : `Claude CLI returned ${r.subtype ?? "non-success result"}`);
-            endStreamWithError(errMsg);
+            if (
+              resumeSessionId &&
+              /No conversation found with session ID/i.test(errMsg)
+            ) {
+              // Recoverable: the driver replays full history once. The CLI
+              // also exits non-zero after this result — silence this
+              // attempt's close/error handlers so the retry owns the stream.
+              resumeMiss = true;
+              broken = true;
+            } else {
+              endStreamWithError(errMsg);
+            }
           }
           if (!isError) {
             // Authoritative episode usage + final-answer safety net.
@@ -325,6 +349,8 @@ export function streamViaCli(
       await new Promise<void>((resolve) => {
         rl.on("close", resolve);
       });
+
+      if (resumeMiss) return "resume-miss";
 
       // Push done event after readline closes (async). Pushing synchronously
       // inside handleMessageStop prevents pi from executing tools.
@@ -356,6 +382,24 @@ export function streamViaCli(
         });
         stream.end();
       }
+      return "ok";
+    } finally {
+      // Clean up this attempt's abort listener
+      if (options?.signal && abortHandler) {
+        options.signal.removeEventListener("abort", abortHandler);
+      }
+    }
+  }
+
+  (async () => {
+    try {
+      const outcome = await runOnce(false);
+      if (outcome === "resume-miss") {
+        console.error(
+          "[pi-claude-cli] CLI session missing for --resume — replaying full history under the current session id",
+        );
+        await runOnce(true);
+      }
     } catch (err: any) {
       stream.push({
         type: "error",
@@ -364,10 +408,6 @@ export function streamViaCli(
       } as any);
       stream.end();
     } finally {
-      // Clean up abort listener
-      if (options?.signal && abortHandler) {
-        options.signal.removeEventListener("abort", abortHandler);
-      }
       cleanupSystemPromptFile();
     }
   })();
