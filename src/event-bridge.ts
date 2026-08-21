@@ -517,6 +517,17 @@ export function createEventBridge(
       } catch {
         /* unserializable input — marker still names the tool */
       }
+      // WIRE CONTRACT — front-ends parse this string.
+      //
+      //   [Claude Code · <ToolName>]              (no arguments)
+      //   [Claude Code · <ToolName> <argsJson>]   (preview, may be truncated)
+      //
+      // pidex matches /^\[Claude Code · ([^\s\]]+)(?:\s+([\s\S]*))?\]$/ to
+      // render these as activity rows instead of prose; anything it cannot
+      // match falls back to being shown as raw markdown, which is what this
+      // marker existed to avoid. Change the shape only together with the
+      // consumers, and keep the argument preview opaque — it is truncated
+      // here, so it is frequently invalid JSON and must never be parsed.
       appendTextBlock(`[Claude Code · ${block.name}${argsPreview}]`);
     }
   }
