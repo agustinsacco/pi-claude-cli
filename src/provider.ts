@@ -41,7 +41,15 @@ import { handleControlRequest } from "./control-handler.js";
 import { mapThinkingEffort } from "./thinking-config.js";
 import { isPiKnownClaudeTool } from "./tool-mapping.js";
 /** Inactivity timeout: kill subprocess if no stdout for 180 seconds (3 minutes). */
-const INACTIVITY_TIMEOUT_MS = 180_000;
+/**
+ * Inactivity timeout. CLI-side tool executions (web search, user MCP
+ * servers, sub-agents) can be silent on stdout for minutes, so the default
+ * is generous and overridable via PI_CLAUDE_CLI_TIMEOUT_MS.
+ */
+const INACTIVITY_TIMEOUT_MS =
+  Number(process.env.PI_CLAUDE_CLI_TIMEOUT_MS) > 0
+    ? Number(process.env.PI_CLAUDE_CLI_TIMEOUT_MS)
+    : 300_000;
 
 /** Extended stream options: pi's SimpleStreamOptions plus optional cwd and mcpConfigPath */
 type StreamViaCLiOptions = SimpleStreamOptions & {
@@ -275,6 +283,12 @@ export function streamViaCli(
             rl.close();
             return; // Don't process further -- done event already pushed by event bridge
           }
+        } else if (msg.type === "assistant") {
+          // Complete-block envelopes: marker text for CLI-side tools that
+          // would otherwise be invisible between cycles.
+          bridge.handleAssistantEnvelope(msg as any);
+        } else if (msg.type === "user") {
+          // Tool results the CLI feeds back between cycles — internal.
         } else if (msg.type === "control_request") {
           handleControlRequest(msg, proc!.stdin!);
         } else if (msg.type === "result") {
@@ -295,6 +309,10 @@ export function streamViaCli(
                 ? r.errors.join("; ")
                 : `Claude CLI returned ${r.subtype ?? "non-success result"}`);
             endStreamWithError(errMsg);
+          }
+          if (!isError) {
+            // Authoritative episode usage + final-answer safety net.
+            bridge.applyResult(r);
           }
           // For both success and error: clean up the subprocess
           clearTimeout(inactivityTimer);

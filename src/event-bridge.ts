@@ -1,4 +1,10 @@
-import type { ClaudeApiEvent, TrackedContentBlock } from "./types";
+import type {
+  ClaudeApiEvent,
+  ClaudeAssistantEnvelope,
+  ClaudeResultMessage,
+  ClaudeUsage,
+  TrackedContentBlock,
+} from "./types";
 import { calculateCost } from "@earendil-works/pi-ai";
 import type {
   AssistantMessage,
@@ -21,6 +27,7 @@ import {
 interface TrackedToolBlock {
   type: "tool_use";
   index: number;
+  cycle: number;
   id: string;
   name: string; // Already mapped to pi name
   claudeName: string; // Original Claude name for arg translation
@@ -39,6 +46,19 @@ type TrackedBlock = TrackedContentBlock | TrackedToolBlock;
  */
 export interface EventBridge {
   handleEvent(event: ClaudeApiEvent): void;
+  /**
+   * Complete-message envelopes (one per finished content block). Used for
+   * CLI-side tool visibility: tools pi cannot execute (WebSearch, user MCP
+   * servers, ToolSearch, …) run inside the CLI between cycles and would
+   * otherwise be invisible — each becomes a one-line marker text block.
+   */
+  handleAssistantEnvelope(envelope: ClaudeAssistantEnvelope): void;
+  /**
+   * The final `result` envelope: authoritative cumulative usage for the
+   * whole episode, plus a safety net that appends the final answer text if
+   * any stream pathology kept it out of the bridged content.
+   */
+  applyResult(result: ClaudeResultMessage): void;
   getOutput(): AssistantMessage;
 }
 
@@ -97,6 +117,71 @@ export function createEventBridge(
 
   let started = false;
 
+  // One subprocess run is a full agentic EPISODE: N API calls ("cycles")
+  // with CLI-side tool executions between them. SSE content_block indexes
+  // reset every cycle, so blocks are matched per-cycle; usage is summed
+  // across cycles (each message_delta carries that cycle's final numbers).
+  let cycle = -1;
+  const cumulativeUsage: Required<ClaudeUsage> = {
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_read_input_tokens: 0,
+    cache_creation_input_tokens: 0,
+  };
+  let cycleUsage: ClaudeUsage = {};
+  /** Tool ids already surfaced as markers (envelope arrives once per block). */
+  const markedToolIds = new Set<string>();
+
+  function recomputeUsage(): void {
+    output.usage.input =
+      cumulativeUsage.input_tokens + (cycleUsage.input_tokens ?? 0);
+    output.usage.output =
+      cumulativeUsage.output_tokens + (cycleUsage.output_tokens ?? 0);
+    output.usage.cacheRead =
+      cumulativeUsage.cache_read_input_tokens +
+      (cycleUsage.cache_read_input_tokens ?? 0);
+    output.usage.cacheWrite =
+      cumulativeUsage.cache_creation_input_tokens +
+      (cycleUsage.cache_creation_input_tokens ?? 0);
+    output.usage.totalTokens =
+      output.usage.input +
+      output.usage.output +
+      output.usage.cacheRead +
+      output.usage.cacheWrite;
+    calculateCost(model, output.usage);
+  }
+
+  /**
+   * Append a complete text block through proper pi stream events.
+   *
+   * `blocks` and `output.content` are parallel arrays (SSE handlers index
+   * into both with the same idx), so the marker must occupy a slot in both;
+   * cycle -1 / index -1 can never match a real SSE event.
+   */
+  function appendTextBlock(text: string): void {
+    if (!started) {
+      stream.push({ type: "start", partial: output });
+      started = true;
+    }
+    blocks.push({ type: "text", text, index: -1, cycle: -1 });
+    output.content.push({ type: "text" as const, text: "" });
+    const contentIndex = output.content.length - 1;
+    stream.push({ type: "text_start", contentIndex, partial: output });
+    (output.content[contentIndex] as TextContent).text = text;
+    stream.push({
+      type: "text_delta",
+      contentIndex,
+      delta: text,
+      partial: output,
+    });
+    stream.push({
+      type: "text_end",
+      contentIndex,
+      content: text,
+      partial: output,
+    });
+  }
+
   function handleEvent(event: ClaudeApiEvent): void {
     // Emit start event on first message — tells pi to begin incremental rendering
     if (!started) {
@@ -106,6 +191,15 @@ export function createEventBridge(
 
     switch (event.type) {
       case "message_start":
+        // New cycle: bank the finished cycle's usage before resetting.
+        cumulativeUsage.input_tokens += cycleUsage.input_tokens ?? 0;
+        cumulativeUsage.output_tokens += cycleUsage.output_tokens ?? 0;
+        cumulativeUsage.cache_read_input_tokens +=
+          cycleUsage.cache_read_input_tokens ?? 0;
+        cumulativeUsage.cache_creation_input_tokens +=
+          cycleUsage.cache_creation_input_tokens ?? 0;
+        cycleUsage = {};
+        cycle++;
         handleMessageStart(event);
         break;
       case "content_block_start":
@@ -130,16 +224,8 @@ export function createEventBridge(
   function handleMessageStart(event: ClaudeApiEvent): void {
     const usage = event.message?.usage;
     if (usage) {
-      output.usage.input = usage.input_tokens ?? 0;
-      output.usage.output = usage.output_tokens ?? 0;
-      output.usage.cacheRead = usage.cache_read_input_tokens ?? 0;
-      output.usage.cacheWrite = usage.cache_creation_input_tokens ?? 0;
-      output.usage.totalTokens =
-        output.usage.input +
-        output.usage.output +
-        output.usage.cacheRead +
-        output.usage.cacheWrite;
-      calculateCost(model, output.usage);
+      cycleUsage = { ...usage };
+      recomputeUsage();
     }
   }
 
@@ -151,6 +237,7 @@ export function createEventBridge(
         type: "text",
         text: "",
         index: event.index ?? 0,
+        cycle,
       };
       blocks.push(block);
       output.content.push({ type: "text" as const, text: "" });
@@ -165,6 +252,7 @@ export function createEventBridge(
         type: "thinking",
         text: "",
         index: event.index ?? 0,
+        cycle,
       };
       blocks.push(block);
       output.content.push({
@@ -193,6 +281,7 @@ export function createEventBridge(
       const block: TrackedToolBlock = {
         type: "tool_use",
         index: event.index ?? 0,
+        cycle,
         id,
         name: piName,
         claudeName,
@@ -220,7 +309,9 @@ export function createEventBridge(
     const deltaType = event.delta?.type;
 
     if (deltaType === "text_delta" && event.delta!.text != null) {
-      const idx = blocks.findIndex((b) => b.index === event.index);
+      const idx = blocks.findIndex(
+        (b) => b.cycle === cycle && b.index === event.index,
+      );
       if (idx === -1) return;
 
       const block = blocks[idx];
@@ -240,7 +331,9 @@ export function createEventBridge(
       deltaType === "thinking_delta" &&
       event.delta!.thinking != null
     ) {
-      const idx = blocks.findIndex((b) => b.index === event.index);
+      const idx = blocks.findIndex(
+        (b) => b.cycle === cycle && b.index === event.index,
+      );
       if (idx === -1) return;
 
       const block = blocks[idx];
@@ -260,7 +353,9 @@ export function createEventBridge(
       deltaType === "input_json_delta" &&
       event.delta!.partial_json != null
     ) {
-      const idx = blocks.findIndex((b) => b.index === event.index);
+      const idx = blocks.findIndex(
+        (b) => b.cycle === cycle && b.index === event.index,
+      );
       if (idx === -1) return;
 
       const block = blocks[idx];
@@ -287,7 +382,9 @@ export function createEventBridge(
       event.delta!.signature != null
     ) {
       // Accumulate signature on the thinking block
-      const idx = blocks.findIndex((b) => b.index === event.index);
+      const idx = blocks.findIndex(
+        (b) => b.cycle === cycle && b.index === event.index,
+      );
       if (idx === -1) return;
 
       const block = blocks[idx];
@@ -300,7 +397,9 @@ export function createEventBridge(
   }
 
   function handleContentBlockStop(event: ClaudeApiEvent): void {
-    const idx = blocks.findIndex((b) => b.index === event.index);
+    const idx = blocks.findIndex(
+      (b) => b.cycle === cycle && b.index === event.index,
+    );
     if (idx === -1) return;
 
     const block = blocks[idx];
@@ -356,20 +455,24 @@ export function createEventBridge(
 
   function handleMessageDelta(event: ClaudeApiEvent): void {
     if (event.delta?.stop_reason) {
+      // The LAST cycle's stop reason is the episode's stop reason.
       output.stopReason = mapStopReason(event.delta.stop_reason);
     }
 
     const usage = event.usage;
     if (usage) {
-      if (usage.input_tokens != null) output.usage.input = usage.input_tokens;
+      // message_delta carries the cycle's final numbers — overwrite within
+      // the cycle, never across cycles (those are banked at message_start).
+      if (usage.input_tokens != null)
+        cycleUsage.input_tokens = usage.input_tokens;
       if (usage.output_tokens != null)
-        output.usage.output = usage.output_tokens;
-      output.usage.totalTokens =
-        output.usage.input +
-        output.usage.output +
-        output.usage.cacheRead +
-        output.usage.cacheWrite;
-      calculateCost(model, output.usage);
+        cycleUsage.output_tokens = usage.output_tokens;
+      if (usage.cache_read_input_tokens != null)
+        cycleUsage.cache_read_input_tokens = usage.cache_read_input_tokens;
+      if (usage.cache_creation_input_tokens != null)
+        cycleUsage.cache_creation_input_tokens =
+          usage.cache_creation_input_tokens;
+      recomputeUsage();
     }
   }
 
@@ -378,8 +481,69 @@ export function createEventBridge(
     // Pushing done here (synchronously) prevents pi from executing tools.
   }
 
+  function handleAssistantEnvelope(envelope: ClaudeAssistantEnvelope): void {
+    // Sub-agent envelopes are the CLI's internal business.
+    if (envelope.parent_tool_use_id) return;
+    for (const block of envelope.message?.content ?? []) {
+      if (block.type !== "tool_use" || !block.name || !block.id) continue;
+      // Pi-known tools already streamed through the SSE path as real pi
+      // tool calls — markers are only for tools the CLI executes itself.
+      if (isPiKnownClaudeTool(block.name)) continue;
+      if (markedToolIds.has(block.id)) continue;
+      markedToolIds.add(block.id);
+
+      let argsPreview = "";
+      try {
+        const json = JSON.stringify(block.input ?? {});
+        argsPreview =
+          json === "{}"
+            ? ""
+            : ` ${json.slice(0, 120)}${json.length > 120 ? "…" : ""}`;
+      } catch {
+        /* unserializable input — marker still names the tool */
+      }
+      appendTextBlock(`[Claude Code · ${block.name}${argsPreview}]`);
+    }
+  }
+
+  function applyResult(result: ClaudeResultMessage): void {
+    // Authoritative cumulative usage for the whole episode (verified to
+    // equal the per-cycle sums on captured streams; trusted over them).
+    const usage = result.usage;
+    if (usage) {
+      cumulativeUsage.input_tokens =
+        usage.input_tokens ?? cumulativeUsage.input_tokens;
+      cumulativeUsage.output_tokens =
+        usage.output_tokens ?? cumulativeUsage.output_tokens;
+      cumulativeUsage.cache_read_input_tokens =
+        usage.cache_read_input_tokens ??
+        cumulativeUsage.cache_read_input_tokens;
+      cumulativeUsage.cache_creation_input_tokens =
+        usage.cache_creation_input_tokens ??
+        cumulativeUsage.cache_creation_input_tokens;
+      cycleUsage = {};
+      recomputeUsage();
+    }
+
+    // Safety net: whatever ended the SSE stream early, the result envelope
+    // carries the episode's final answer — never let it be lost.
+    const finalText = (result.result ?? "").trim();
+    if (finalText) {
+      const streamedText = output.content
+        .filter((c): c is TextContent => c.type === "text")
+        .map((c) => c.text)
+        .join("\n");
+      const tail = finalText.slice(-Math.min(finalText.length, 60));
+      if (!streamedText.includes(tail)) {
+        appendTextBlock(finalText);
+      }
+    }
+  }
+
   return {
     handleEvent,
+    handleAssistantEnvelope,
+    applyResult,
     getOutput: () => output,
   };
 }

@@ -13,6 +13,49 @@ export interface ClaudeResultMessage {
   result?: string;
   error?: string;
   session_id?: string;
+  /** Cumulative usage across every cycle of the episode (authoritative). */
+  usage?: ClaudeUsage;
+  num_turns?: number;
+  total_cost_usd?: number;
+}
+
+/**
+ * Complete-message envelope the CLI emits once per finished content block
+ * (in addition to the SSE stream_events). `parent_tool_use_id` is null for
+ * top-level content and set for sub-agent activity.
+ */
+export interface ClaudeAssistantEnvelope {
+  type: "assistant";
+  parent_tool_use_id?: string | null;
+  message: {
+    id?: string;
+    role?: string;
+    stop_reason?: string | null;
+    content?: Array<{
+      type: string;
+      text?: string;
+      thinking?: string;
+      id?: string;
+      name?: string;
+      input?: Record<string, unknown>;
+    }>;
+    usage?: ClaudeUsage;
+  };
+}
+
+/** Tool results the CLI feeds back between cycles (top-level only). */
+export interface ClaudeUserEnvelope {
+  type: "user";
+  parent_tool_use_id?: string | null;
+  message: {
+    role?: string;
+    content?: Array<{
+      type: string;
+      tool_use_id?: string;
+      content?: unknown;
+      is_error?: boolean;
+    }>;
+  };
 }
 
 export interface ClaudeSystemMessage {
@@ -36,7 +79,9 @@ export type NdjsonMessage =
   | ClaudeStreamEventMessage
   | ClaudeResultMessage
   | ClaudeSystemMessage
-  | ClaudeControlRequest;
+  | ClaudeControlRequest
+  | ClaudeAssistantEnvelope
+  | ClaudeUserEnvelope;
 
 // Claude API event types (inside stream_event wrapper)
 
@@ -81,5 +126,6 @@ export interface ClaudeUsage {
 export interface TrackedContentBlock {
   type: "text" | "thinking";
   text: string;
-  index: number; // Claude's content_block index
+  index: number; // Claude's content_block index (resets each cycle)
+  cycle: number; // Which API call of the episode this block belongs to
 }

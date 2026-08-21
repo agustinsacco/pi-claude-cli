@@ -17,15 +17,22 @@ export const TOOL_EXECUTION_DENIED_MESSAGE =
 /** Prefix for MCP (Model Context Protocol) tool names. */
 export const MCP_PREFIX = "mcp__";
 
+/**
+ * Claude Code 2.x control_response wire shape: `request_id` lives INSIDE
+ * `response`, and allow decisions carry `updatedInput` (the tool input,
+ * passed through unmodified). The 1.x shape (`request_id` at the top level)
+ * is silently ignored by 2.1.x — the CLI keeps waiting for an answer and
+ * the episode stalls until the inactivity timer kills it, which surfaced
+ * as truncated multi-cycle turns (#3). Verified against claude 2.1.237.
+ */
 interface ControlResponse {
   type: "control_response";
-  request_id: string;
   response: {
     subtype: "success";
-    response: {
-      behavior: "allow" | "deny";
-      message?: string;
-    };
+    request_id: string;
+    response:
+      | { behavior: "allow"; updatedInput: Record<string, unknown> }
+      | { behavior: "deny"; message: string };
   };
 }
 
@@ -54,12 +61,12 @@ export function handleControlRequest(
 
   const response: ControlResponse = {
     type: "control_response",
-    request_id: msg.request_id,
     response: {
       subtype: "success",
+      request_id: msg.request_id,
       response: isCustomTool
         ? { behavior: "deny", message: TOOL_EXECUTION_DENIED_MESSAGE }
-        : { behavior: "allow" },
+        : { behavior: "allow", updatedInput: msg.request?.input ?? {} },
     },
   };
 
