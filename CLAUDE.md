@@ -26,7 +26,7 @@ CI (`.github/workflows/ci.yml`) runs lint + format:check, typecheck, and `test:c
 
 The request flow, entry to exit:
 
-1. **`index.ts`** — extension entry. Validates the CLI is present/authenticated, registers the provider exposing all `anthropic` models from pi's catalog, and lazily builds the MCP config on the first request (`getAllTools()` is not safe to call at load time). On `session_start` it force-activates every registered tool so pi will execute them.
+1. **`index.ts`** — extension entry. Validates the CLI is present/authenticated, registers the provider exposing all `anthropic` models from pi's catalog, and lazily builds the MCP config on the first request (`getAllTools()` is not safe to call at load time). On `session_start` it force-activates every registered tool so pi will execute them, and stashes the `ctx` used to publish account status. Registration happens **twice** — `pi.registerProvider()` and `registerApiProvider()` from `@earendil-works/pi-ai/compat` — because pi 0.84 has two dispatch paths; drop the second and print mode and nested agent loops throw `No API provider registered`.
 2. **`src/provider.ts`** (`streamViaCli`) — the orchestrator. Builds the prompt, spawns the subprocess, writes the user message to stdin, reads stdout line-by-line, and drives the whole lifecycle (inactivity timeout, abort, cleanup). Returns an `AssistantMessageEventStream` that pi consumes.
 3. **`src/prompt-builder.ts`** — flattens pi's message history into the text/blocks prompt. First turn → full history via `buildPrompt`; resumed turns → only the new tail via `buildResumePrompt`. Also builds the system prompt (merges `AGENTS.md`, sanitizing `.pi` → `.claude`).
 4. **`src/process-manager.ts`** — spawns `claude` with the correct flags via `cross-spawn`, writes NDJSON to stdin, force-kills (SIGKILL), and keeps a registry of live subprocesses so they can all be reaped on exit.
@@ -47,7 +47,7 @@ pi must execute tools itself; the Claude CLI would otherwise execute them. So th
 Consequences to keep in mind when editing:
 
 - **Only top-level events matter.** Events with `parent_tool_use_id` are sub-agent internals and must be filtered out (both for forwarding and for the break-early decision).
-- **`isPiKnownClaudeTool`** is the gate: built-in mapped tools and `mcp__custom-tools__*` are "known"; internal CLI tools (`Task`, `Agent`, `ToolSearch`, …) are not and must be dropped, never surfaced to pi as tool calls.
+- **`isPiKnownClaudeTool`** is the gate: built-in mapped tools and `mcp__custom-tools__*` are "known"; internal CLI tools (`Task`, `Agent`, `ToolSearch`, …) are not, and must never be surfaced to pi as **tool calls** — the CLI executes those itself. They are not silent, though: they are emitted as `[Claude Code · Name {args}]` marker text blocks, which front-ends parse. That string is a wire contract, not cosmetics (see `docs/ARCHITECTURE.md`).
 - The stream terminates with a **`done`** event (never `error`) — pi's `extractResult()` treats `error` as a bare string and later calls `.content` on it, which crashes. `endStreamWithError` deliberately pushes a well-formed `done` with `content: []` instead.
 - The `done` event is pushed **after** readline closes (async), not inside `message_stop`; pushing it synchronously would let the CLI execute tools before the kill lands.
 
@@ -55,11 +55,25 @@ Consequences to keep in mind when editing:
 
 pi passes a `sessionId` on every call. `provider.ts` resumes (`--resume <id>`, sending only the new tail via `buildResumePrompt`) **only when the conversation already contains a prior assistant turn from this provider** (`provider`/`api === "pi-claude-cli"`); otherwise it starts a fresh CLI session (`--session-id <id>`, full history via `buildPrompt`). This provider-aware check — not a bare `messages.length` test — is what keeps a mid-session `/model` switch from another provider from `--resume`-ing a CLI session that was never created (which fails silently as an empty message). Resuming also skips re-sending the system prompt, since it's already in the CLI's session context.
 
+Two invariants here have each caused a real outage; both are explained at length in `docs/ARCHITECTURE.md`:
+
+- **`buildResumePrompt` anchors on the last _assistant_ message**, never the last user message. pi's tool loop leaves the only `user` entry at index 0, so anchoring there replays the entire transcript on every iteration. If a change makes the resume prompt grow with conversation length, it has regressed.
+- **A resume can miss.** Forks copy history into a new pi session id, so the heuristic says "resume" while the CLI cache is keyed to the old id. `streamViaCli` is a driver over `runOnce(forceFullReplay)`: a resume-miss aborts without touching pi's stream and retries once with a full replay under `--session-id`.
+
+### Episodes, not messages
+
+One subprocess run is a full agentic **episode** — N API cycles with CLI-side tool executions between them — and SSE `content_block` indexes **reset every cycle**. `event-bridge.ts` keys tracked blocks by `(cycle, index)` and banks per-cycle usage at each `message_start`. Treating an episode as one message is what used to fold later-cycle content into earlier blocks and lose final answers.
+
+Thinking blocks are materialized **lazily**, on the first `thinking_delta` carrying actual text: most models stream encrypted thinking (signature only, empty-string deltas) and materializing eagerly produces empty "thoughts" in every front-end.
+
 ### Other lifecycle details worth knowing
 
 - Long system prompts are written to a temp file and passed to `--append-system-prompt` as a path (avoids `ENAMETOOLONG`, especially on Windows); the temp file is cleaned up in `finally`.
 - The CLI hangs after emitting its `result` message (known upstream bug) — `cleanupProcess` force-kills after a 500ms grace flush.
-- Inactivity timeout is 180s of no stdout; abort uses SIGKILL; a `streamEnded`/`broken` guard pair prevents double `end()`/error races.
+- Inactivity timeout is **300s** of no stdout (`PI_CLAUDE_CLI_TIMEOUT_MS` overrides). It is deliberately generous: CLI-side tools are legitimately silent for minutes. Abort uses SIGKILL; a `streamEnded`/`broken` guard pair prevents double `end()`/error races.
+- **Context overflow** is rewritten by `src/overflow.ts` to the `context_length_exceeded:` prefix pi's auto-compaction recognizes. The matcher is deliberately narrow and must never catch rate-limit errors, which belong on pi's retry/backoff path.
+- `PI_CLAUDE_CLI_HERMETIC=1` adds `--strict-mcp-config --setting-sources ""` so the user's own MCP servers, hooks and CLAUDE.md stay out of pi turns.
+- **Account rate-limit state travels outside the stream** — `onRateLimit` → `ctx.ui.setStatus("claude-rate-limit", json)`. It must never be folded into turn content, which would put account state in the user's transcript and pi's session file.
 
 ## Conventions
 

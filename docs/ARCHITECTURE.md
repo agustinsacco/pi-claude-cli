@@ -98,6 +98,31 @@ cycle's `stop_reason` is the episode's stop reason.
 Before this was understood, later-cycle content folded into earlier blocks,
 usage reported roughly one cycle, and the final answer could be lost.
 
+### Thinking blocks are materialized lazily (0.4.4)
+
+Most Claude models stream **encrypted** thinking: a multi-kilobyte
+`signature_delta` plus `thinking_delta` events whose text is the empty
+string, and no plaintext ever. Measured with identical prompts at
+`--thinking medium` on real turns: fable-5, opus-5 and sonnet-5 all do this;
+**haiku-4-5 is the only family that sends plaintext**.
+
+Materializing on `content_block_start` therefore produced thinking blocks
+with a 3k signature and zero characters of text, which front-ends faithfully
+render as a "thought" that expands to nothing. So a thinking block is now
+created on the **first `thinking_delta` that actually carries text** — an
+empty-string delta must not bring one into existence — and dropped at
+`content_block_stop` if none ever arrived. A signature that precedes the
+plaintext is buffered and applied on materialization, so genuine thinking
+keeps its signature.
+
+This is why `TrackedContentBlock` carries an explicit `contentIndex` instead
+of a parallel-array invariant with `output.content`: a dropped block must not
+shift the indexes of the blocks after it.
+
+Sessions recorded before 0.4.4 still hold empty thinking blocks on disk
+forever, so front-ends need their own guard regardless — pidex skips them on
+settled items.
+
 ## Tools: the three-way split
 
 **Built-ins** are pure renaming (`tool-mapping.ts` is the single source of
@@ -146,10 +171,15 @@ natural starting points if a front-end ever wants richer Claude-Code-side UX:
   `tool_result` blocks for tools the CLI executed itself. `provider.ts`
   ignores them, so markers show _what was invoked_ but never what came back.
   Surfacing them means pairing each result with its `tool_use_id`.
-- **Sub-agent activity.** Everything with `parent_tool_use_id` set (the
-  CLI's own `Task` agents) is filtered out in both `provider.ts` and
+- **Sub-agent episodes.** The _launch_ is visible — `Task` is a CLI-side
+  tool, so it surfaces as an ordinary marker and pidex renders those as
+  sub-agent rows — but everything the sub-agent then does arrives with
+  `parent_tool_use_id` set and is filtered out in both `provider.ts` and
   `handleAssistantEnvelope`. Those events carry a full nested episode; a
-  front-end that wanted a sub-agent tree would consume them there.
+  front-end that wanted a live sub-agent tree would consume them there.
+  Until then, a consumer knows an agent was **launched** and nothing more —
+  no progress, no result, and no liveness (the CLI does not outlive the
+  turn), so it must not imply otherwise.
 
 ### Enforcement is belt-and-suspenders
 
@@ -166,9 +196,9 @@ pi's session JSONL is the **only** authoritative record. The CLI session is
 a disposable cache keyed by pi's session id.
 
 - First provider turn: `--session-id <pi id>` creates the CLI session.
-- Later turns: `--resume <pi id>` plus a **delta** prompt (only tool results
-  since the last assistant turn, plus new user text) — this is also what
-  keeps Anthropic's prompt cache warm.
+- Later turns: `--resume <pi id>` plus a **delta** prompt (only what follows
+  the last assistant turn) — this is also what keeps Anthropic's prompt
+  cache warm.
 - Resume is only attempted when the conversation already contains an
   assistant turn from this provider (`hasPriorCliTurn`).
 - **Resume miss** (forks copy history into a _new_ pi session id, so the
@@ -179,6 +209,27 @@ a disposable cache keyed by pi's session id.
 
 Switching models mid-session, forking, or losing the CLI cache therefore
 costs one full replay — never a lost turn.
+
+### The delta anchor is load-bearing (0.4.6)
+
+`buildResumePrompt` anchors on the **last assistant message** and sends only
+what follows it. It must not anchor on the last _user_ message: pi's tool
+loop appends `[user, assistant(toolUse), toolResult, assistant(toolUse),
+toolResult, …]`, so the single `user` entry stays at index 0 for the life of
+the loop, and anchoring there replays the whole transcript on **every
+iteration** — content the CLI already holds.
+
+That bug was expensive rather than visible, and it compounded: when the
+first user message carried an image, the image branch returned early with
+just the image and discarded every tool result, so the model never saw any
+tool output and re-issued the same call indefinitely. One observed session
+made 66 API calls of which 65 produced no work, transmitted one screenshot
+48 times, and peaked at 1.44M tokens of context per call — while looking,
+from the outside, like a slow session.
+
+The invariant to preserve: **delta size stays flat as the tool loop
+deepens.** If a change makes the resume prompt grow with conversation
+length, it has regressed.
 
 ## Errors and recovery
 
@@ -203,6 +254,51 @@ Usage comes from `message_start` / `message_delta` per cycle and the
 `calculateCost`. **Token counts are real; the dollar figure is notional** —
 it is computed at API list prices while the user is actually spending plan
 quota.
+
+## Account state: rate limits (0.4.5)
+
+The CLI emits a `rate_limit_event` envelope describing the **account's**
+plan window. This is not turn content and must never become any: it says
+nothing about the answer being streamed, and folding it into the message
+would put account state into the user's transcript and into pi's session
+file. It travels a separate path end to end:
+
+```
+provider.ts   rate_limit_event → options.onRateLimit(info)   (never touches pi's stream)
+index.ts      publishRateLimit → ctx.ui.setStatus("claude-rate-limit", json)
+front-end     reads the status key, renders it however it likes
+```
+
+The key is **`claude-rate-limit`** — deliberately neutral rather than
+namespaced to any one front-end, since it is account state any pi front-end
+can use. The payload is JSON:
+
+```jsonc
+{
+  "status": "allowed", // "rejected" once the window is capped
+  "resetsAt": 1787368800, // unix seconds
+  "rateLimitType": "five_hour",
+  "overageStatus": "rejected",
+  "isUsingOverage": false,
+  "observedAt": 1787363602,
+} // when we saw it, not from the CLI
+```
+
+Two behaviors worth knowing before you build on it. The CLI repeats the
+event **every turn**, so `publishRateLimit` pushes only when the payload
+changes (comparing with `observedAt` stripped) — a status that rewrites
+itself constantly is noise for whatever renders it. And `session_start`
+stashes its `ctx` in module scope, because the stream runs deep inside
+`streamSimple`, which has no `ExtensionContext` of its own.
+
+**What this does not carry: utilization percentages.** The "12% of your 5-hour
+limit" figures in Claude Code's own TUI come from
+`anthropic-ratelimit-unified-*` **response headers**, which the CLI consumes
+in-process and never forwards to stdout. So a consumer can honestly say
+_when capacity returns_ and whether the account is capped or on overage —
+never _how much is left_. Getting the percentages would mean making
+authenticated Anthropic requests outside the CLI, which is exactly the line
+this extension exists not to cross.
 
 ## Environment bleed
 
@@ -240,6 +336,9 @@ fires, and the turn looks truncated. This was the root cause behind every
 | 0.4.1   | 2.x control protocol; cycle-aware bridge (ordering, cumulative usage, final-answer safety net); CLI-side tool markers; 300s timeout |
 | 0.4.2   | Resume-miss → one full-replay retry (fixes forked sessions)                                                                         |
 | 0.4.3   | Overflow → `context_length_exceeded` rewrite (pi auto-compaction); hermetic mode                                                    |
+| 0.4.4   | Lazy thinking materialization (no empty blocks for encrypted thinking); explicit `contentIndex` per tracked block                   |
+| 0.4.5   | `rate_limit_event` → `claude-rate-limit` status key for front-ends                                                                  |
+| 0.4.6   | Resume delta anchors on the last **assistant** message — stops full-transcript replay on every tool iteration                       |
 
 ## Testing
 
