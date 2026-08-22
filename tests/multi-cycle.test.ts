@@ -188,3 +188,91 @@ describe("multi-cycle episodes (issue #3)", () => {
     expect(done.message.usage.cacheWrite).toBe(7561 + 9962);
   });
 });
+
+describe("rate limit forwarding (account state, not turn content)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it("hands rate_limit_event to the host and keeps it out of the message", async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    streamViaCli(model, { messages: [{ role: "user", content: "go" }] }, {
+      onRateLimit: (info) => seen.push(info),
+    } as any);
+    await vi.advanceTimersByTimeAsync(0);
+    const proc = (spawn as any).mock.results[0].value;
+
+    // Captured verbatim from claude 2.1.237.
+    proc.stdout.write(
+      JSON.stringify({
+        type: "rate_limit_event",
+        rate_limit_info: {
+          status: "allowed",
+          resetsAt: 1787331600,
+          rateLimitType: "five_hour",
+          overageStatus: "rejected",
+          isUsingOverage: false,
+        },
+      }) + "\n",
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    proc.stdout.write(
+      JSON.stringify({ type: "result", subtype: "success", result: "hi" }) +
+        "\n",
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    proc.stdout.end();
+    proc.emit("exit", 0);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({
+      rateLimitType: "five_hour",
+      resetsAt: 1787331600,
+    });
+
+    const mockStream = MockAssistantMessageEventStream.mock.instances[0];
+    const done = mockStream._events.find((e: any) => e.type === "done");
+    const text = (done.message.content as any[])
+      .filter((c) => c.type === "text")
+      .map((c) => c.text)
+      .join("");
+    expect(text).not.toContain("rate_limit");
+    expect(text).not.toContain("five_hour");
+  });
+
+  it("survives a host callback that throws", async () => {
+    streamViaCli(model, { messages: [{ role: "user", content: "go" }] }, {
+      onRateLimit: () => {
+        throw new Error("host blew up");
+      },
+    } as any);
+    await vi.advanceTimersByTimeAsync(0);
+    const proc = (spawn as any).mock.results[0].value;
+    proc.stdout.write(
+      JSON.stringify({
+        type: "rate_limit_event",
+        rate_limit_info: { status: "allowed", rateLimitType: "five_hour" },
+      }) + "\n",
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    proc.stdout.write(
+      JSON.stringify({
+        type: "result",
+        subtype: "success",
+        result: "still here",
+      }) + "\n",
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    proc.stdout.end();
+    proc.emit("exit", 0);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const mockStream = MockAssistantMessageEventStream.mock.instances[0];
+    expect(
+      mockStream._events.find((e: any) => e.type === "done"),
+    ).toBeDefined();
+  });
+});

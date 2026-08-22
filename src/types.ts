@@ -43,6 +43,24 @@ export interface ClaudeAssistantEnvelope {
   };
 }
 
+/**
+ * Emitted when the API reports rate-limit state for the account. Carries the
+ * window and its reset, not a utilization percentage — the percentages the
+ * Claude Code TUI shows come from `anthropic-ratelimit-unified-*` response
+ * headers, which the CLI consumes in-process and does not forward here.
+ */
+export interface ClaudeRateLimitEvent {
+  type: "rate_limit_event";
+  rate_limit_info?: {
+    status?: string;
+    resetsAt?: number;
+    rateLimitType?: string;
+    overageStatus?: string;
+    overageDisabledReason?: string;
+    isUsingOverage?: boolean;
+  };
+}
+
 /** Tool results the CLI feeds back between cycles (top-level only). */
 export interface ClaudeUserEnvelope {
   type: "user";
@@ -81,7 +99,8 @@ export type NdjsonMessage =
   | ClaudeSystemMessage
   | ClaudeControlRequest
   | ClaudeAssistantEnvelope
-  | ClaudeUserEnvelope;
+  | ClaudeUserEnvelope
+  | ClaudeRateLimitEvent;
 
 // Claude API event types (inside stream_event wrapper)
 

@@ -22,6 +22,44 @@ process.on("exit", killAllProcesses);
 
 const PROVIDER_ID = "pi-claude-cli";
 
+/**
+ * Status key carrying account rate-limit state to the front-end. Neutral
+ * (not pidex-specific) because any pi front-end can read it.
+ */
+const RATE_LIMIT_STATUS_KEY = "claude-rate-limit";
+
+/**
+ * The stream runs deep inside streamSimple, which has no ExtensionContext,
+ * so the ctx handed to session_start is kept for its `ui.setStatus`.
+ */
+let uiContext:
+  { ui?: { setStatus?(key: string, text?: string): void } } | undefined;
+/** Last payload pushed — the CLI repeats this event on every turn. */
+let lastRateLimitJson: string | undefined;
+
+function publishRateLimit(info: Record<string, unknown>): void {
+  const setStatus = uiContext?.ui?.setStatus;
+  if (typeof setStatus !== "function") return;
+  const payload = JSON.stringify({
+    status: info.status,
+    resetsAt: info.resetsAt,
+    rateLimitType: info.rateLimitType,
+    overageStatus: info.overageStatus,
+    isUsingOverage: info.isUsingOverage === true,
+    observedAt: Math.floor(Date.now() / 1000),
+  });
+  // Push only on change: the event repeats every turn, and a status that
+  // rewrites itself constantly is noise for whatever renders it.
+  const withoutObservedAt = payload.replace(/,"observedAt":\d+/, "");
+  if (withoutObservedAt === lastRateLimitJson) return;
+  lastRateLimitJson = withoutObservedAt;
+  try {
+    setStatus.call(uiContext!.ui, RATE_LIMIT_STATUS_KEY, payload);
+  } catch {
+    /* never break a turn over a status push */
+  }
+}
+
 let mcpConfigPath: string | undefined;
 let mcpConfigResolved = false;
 
@@ -91,7 +129,9 @@ export default function (pi: ExtensionAPI) {
 
     // Ensure all registered tools are active so pi can execute them.
     // Some tools (find, grep, ls) are registered but not activated by default.
-    pi.on("session_start", async () => {
+    pi.on("session_start", async (_event: unknown, ctx: unknown) => {
+      uiContext = ctx as typeof uiContext;
+      lastRateLimitJson = undefined;
       const allTools = pi.getAllTools();
       if (Array.isArray(allTools)) {
         pi.setActiveTools(allTools.map((t: any) => t.name));
@@ -107,6 +147,7 @@ export default function (pi: ExtensionAPI) {
       return streamViaCli(model, context, {
         ...options,
         mcpConfigPath: configPath,
+        onRateLimit: publishRateLimit,
       });
     };
 

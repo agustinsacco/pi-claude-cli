@@ -55,6 +55,8 @@ const INACTIVITY_TIMEOUT_MS =
 type StreamViaCLiOptions = SimpleStreamOptions & {
   cwd?: string;
   mcpConfigPath?: string;
+  /** Called with account rate-limit state as the CLI reports it. */
+  onRateLimit?: (info: Record<string, unknown>) => void;
 };
 
 /**
@@ -295,6 +297,18 @@ export function streamViaCli(
             forceKillProcess(proc!);
             rl.close();
             return; // Don't process further -- done event already pushed by event bridge
+          }
+        } else if (msg.type === "rate_limit_event") {
+          // Account-level state, not turn content: hand it to the host so a
+          // front-end can surface the window and its reset. Never touches
+          // the assistant message.
+          const info = (msg as any).rate_limit_info;
+          if (info && typeof info === "object") {
+            try {
+              options?.onRateLimit?.(info);
+            } catch {
+              /* a status push must never break a turn */
+            }
           }
         } else if (msg.type === "assistant") {
           // Complete-block envelopes: marker text for CLI-side tools that
