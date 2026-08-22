@@ -1065,3 +1065,82 @@ describe("buildResumePrompt", () => {
     expect((result as any[])[1].type).toBe("image");
   });
 });
+
+/**
+ * Pi drives tool use by appending to a single context whose only `user` entry
+ * stays at index 0: [user, assistant(toolUse), toolResult, assistant(toolUse),
+ * toolResult, ...]. Anchoring the resume delta on the last *user* message
+ * therefore replayed the whole transcript every iteration — and when that first
+ * user message carried an image, the image branch returned early with only the
+ * image, so tool results never reached the model and it re-issued the same call
+ * forever. These cover both shapes at increasing loop depth.
+ */
+describe("buildResumePrompt — tool-loop delta (regression)", () => {
+  const toolLoop = (iterations: number, firstUserContent: any) => {
+    const messages: any[] = [{ role: "user", content: firstUserContent }];
+    for (let i = 0; i < iterations; i++) {
+      messages.push({
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            name: "bash",
+            arguments: { command: `ls dir${i}` },
+          },
+        ],
+      });
+      messages.push({
+        role: "toolResult",
+        toolName: "bash",
+        content: `RESULT-${i}`,
+      });
+    }
+    return { messages };
+  };
+
+  it("sends only the newest tool result, not the whole transcript", () => {
+    const result = buildResumePrompt(toolLoop(4, "start the task")) as string;
+    expect(result).toContain("RESULT-3");
+    expect(result).not.toContain("RESULT-0");
+    expect(result).not.toContain("RESULT-1");
+    expect(result).not.toContain("RESULT-2");
+    // The original request lives in the CLI's own resumed session already.
+    expect(result).not.toContain("start the task");
+  });
+
+  it("keeps the delta flat as the tool loop deepens", () => {
+    const sizes = [1, 5, 10, 25].map(
+      (n) =>
+        (buildResumePrompt(toolLoop(n, "start the task")) as string).length,
+    );
+    // Every depth carries exactly one tool result, so the prompt must not grow
+    // with the transcript. Allow a couple of chars for the result index widening
+    // (RESULT-0 vs RESULT-24), which is the only legitimate variation.
+    expect(Math.max(...sizes) - Math.min(...sizes)).toBeLessThanOrEqual(2);
+  });
+
+  it("does not re-send a pasted image on resumed tool-loop turns", () => {
+    const withImage = [
+      { type: "text", text: "look at this screenshot" },
+      { type: "image", data: "A".repeat(4096), mimeType: "image/png" },
+    ];
+    for (const depth of [1, 5, 10]) {
+      const result = buildResumePrompt(toolLoop(depth, withImage));
+      expect(typeof result).toBe("string");
+      expect(result).not.toContain("AAAA");
+      // The tool result must survive — dropping it is what caused the livelock.
+      expect(result as string).toContain(`RESULT-${depth - 1}`);
+    }
+  });
+
+  it("still sends a genuinely new user message after the last assistant turn", () => {
+    const context = toolLoop(3, "start the task");
+    context.messages.push({
+      role: "user",
+      content: "actually, do this instead",
+    });
+    const result = buildResumePrompt(context) as string;
+    expect(result).toContain("RESULT-2");
+    expect(result).toContain("actually, do this instead");
+  });
+});
