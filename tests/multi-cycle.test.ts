@@ -199,7 +199,7 @@ describe("rate limit forwarding (account state, not turn content)", () => {
   it("hands rate_limit_event to the host and keeps it out of the message", async () => {
     const seen: Array<Record<string, unknown>> = [];
     streamViaCli(model, { messages: [{ role: "user", content: "go" }] }, {
-      onRateLimit: (info) => seen.push(info),
+      onRateLimit: (info: Record<string, unknown>) => seen.push(info),
     } as any);
     await vi.advanceTimersByTimeAsync(0);
     const proc = (spawn as any).mock.results[0].value;
