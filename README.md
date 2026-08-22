@@ -45,6 +45,8 @@ Requires the `claude` binary on your login-shell PATH (`npm install -g @anthropi
 - Exposes custom pi tools to Claude via MCP (schema-only, no execution)
 - Break-early pattern prevents Claude CLI from auto-executing tools
 - Session resume via `--resume` eliminates history replay on follow-up turns
+- Reports account rate-limit state (window, reset, overage) to the front-end
+  on the `claude-rate-limit` status key — never mixed into turn content
 - Configurable thinking effort across the full ladder (low to max) for all models, with elevated mapping for Opus
 - Cross-platform subprocess management (Windows, macOS, Linux)
 - Inactivity timeout and process registry for cleanup
@@ -54,6 +56,11 @@ Requires the `claude` binary on your login-shell PATH (`npm install -g @anthropi
 `docs/ARCHITECTURE.md` covers the turn lifecycle, the three-way tool split,
 the two-ledger session model, error recovery, and the CLI compatibility
 notes (including the 2.x control-protocol shape).
+
+Two of its sections are **contracts a front-end can depend on**, so read
+them before changing what this extension emits: the
+`[Claude Code · Tool {args}]` marker string, and the `claude-rate-limit`
+status key.
 
 ## What your Claude environment contributes
 
