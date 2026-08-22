@@ -140,15 +140,22 @@ function buildCustomToolResultPrompt(messages: any[]): string | null {
 /**
  * Build a prompt for a resumed session.
  *
- * When resuming via --resume, the CLI already has the full conversation history.
- * We only need to send the new content since the last turn: the last assistant
- * response's tool results (if any) followed by the latest user message.
+ * When resuming via --resume, the CLI already has the full conversation history
+ * up through the most recent assistant turn it produced. We only need to send
+ * the delta since that turn: trailing tool results for the last assistant
+ * tool_use, and/or a new user message.
  *
- * For tool_use flows: pi sends [user, assistant(toolCall), toolResult, ...]
- * We need to include tool results so the resumed session sees them, plus the
- * final user message.
+ * Why anchor on the last assistant message rather than the last user message?
+ * Pi's tool loop appends [user, assistant(toolUse), toolResult,
+ * assistant(toolUse), toolResult, ...] — the only `user` entry stays at index 0
+ * across many provider invocations. Anchoring there made every iteration replay
+ * the entire transcript, and when that first user message carried an image the
+ * image branch below returned early with just the image, so tool results never
+ * reached the model at all. The model then re-issued the same tool call
+ * indefinitely while each turn re-billed the whole accumulated context.
  *
- * Falls back to full prompt if the message structure is unexpected.
+ * Returns "" when there's nothing new to send (e.g. only an assistant message
+ * exists in the context — can happen mid-shutdown).
  */
 export function buildResumePrompt(context: {
   messages: any[];
@@ -156,28 +163,16 @@ export function buildResumePrompt(context: {
   const messages = context.messages;
   if (messages.length === 0) return "";
 
-  // Find the last user message
-  const finalUserIndex = findFinalUserMessageIndex(messages);
-  if (finalUserIndex < 0) return "";
-
-  // Collect new messages: everything from the last assistant turn onwards
-  // (tool results from the last assistant + the new user message)
-  const newMessages: any[] = [];
-
-  // Walk backwards from finalUserIndex to find where new content starts.
-  // Include trailing toolResult messages that follow the last assistant turn.
-  let startIdx = finalUserIndex;
-  for (let i = finalUserIndex - 1; i >= 0; i--) {
-    if (messages[i].role === "toolResult") {
-      startIdx = i;
-    } else {
+  let lastAssistantIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === "assistant") {
+      lastAssistantIdx = i;
       break;
     }
   }
 
-  for (let i = startIdx; i < messages.length; i++) {
-    newMessages.push(messages[i]);
-  }
+  const newMessages = messages.slice(lastAssistantIdx + 1);
+  if (newMessages.length === 0) return "";
 
   // If there are only tool results + one user message, build a combined prompt
   const parts: string[] = [];
