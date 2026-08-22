@@ -81,6 +81,41 @@ allowlists). Model access and your subscription login are unaffected.
 Related knobs: `PI_CLAUDE_CLI_TIMEOUT_MS` overrides the 300s inactivity
 timeout (CLI-side tools can be silent on stdout for minutes).
 
+### Which system prompt
+
+`PI_CLAUDE_CLI_SYSTEM_PROMPT` chooses whose system prompt the subprocess
+runs under. It is read per spawn, so a host can change it between sessions.
+
+| Value                | Behaviour                                                                 |
+| -------------------- | ------------------------------------------------------------------------- |
+| `claude` _(default)_ | `--append-system-prompt`: pi's prompt layers on top of Claude Code's own. |
+| `pi`                 | `--system-prompt`: pi's prompt replaces Claude Code's entirely.           |
+
+`minimal` is accepted as an alias for `pi`, `append` for `claude`; anything
+unrecognised falls back to the default rather than failing a session.
+
+**Why you might want `pi`.** The point of a minimal harness is not inheriting
+another agent's preamble. Measured on a real session, the CLI's fixed cached
+prefix was 17,475 tokens; the tool schemas (~4.3k) stay either way, but the
+rest is Claude Code's prompt, and pi's own — after the tool-section rewrite
+below — is ~674 tokens. That frees roughly 12k tokens of context window per
+call. It is a window win, not a cost win: the prefix is cached and bills at
+0.1x.
+
+**Why the default is still `claude`.** Claude Code's prompt carries operating
+guidance for its own tools. Replacing it leaves the model with pi's
+instructions plus the raw tool schemas. To stop that being actively
+misleading, `pi` mode rewrites pi's tool sections — which name pi's tools
+(`read`, `edit`, `grep`, `find`, `ls`) and pi's parameters (`path`,
+`oldText`, `newText`) — into Claude Code's vocabulary (`Read`, `Edit`,
+`Grep`, `Glob`, with `file_path`, `old_string`, `new_string`). If pi ever
+restyles its prompt so the `Available tools:` / `Guidelines:` anchors are
+missing, the prompt passes through untouched rather than being mangled.
+
+Only the session-creating turn sends a system prompt — the CLI keeps it for
+the life of the session — so a change takes effect on the next new session,
+not the current one.
+
 ## License
 
 MIT

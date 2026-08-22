@@ -12,6 +12,10 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve, join, dirname } from "node:path";
 import { homedir } from "node:os";
 import {
+  DEFAULT_SYSTEM_PROMPT_MODE,
+  type SystemPromptMode,
+} from "./system-prompt-mode.js";
+import {
   mapPiToolNameToClaude,
   translatePiArgsToClaude,
   isCustomToolName,
@@ -344,18 +348,85 @@ function findFinalUserMessageIndex(messages: any[]): number {
 }
 
 /**
+ * Tool guidance in Claude Code's vocabulary, used only in `pi` prompt mode.
+ *
+ * Replacing Claude Code's system prompt means the model still receives its
+ * tool *schemas* from the API but loses the prose about when and how to use
+ * them. Pi's own prose can't stand in unedited: it names pi's tools
+ * (`read`, `edit`, `grep`, `find`, `ls`) and pi's parameters (`path`,
+ * `oldText`, `newText`), none of which match what the model is actually
+ * handed (`Read`, `Edit`, `Grep`, `Glob`, with `file_path`, `old_string`,
+ * `new_string`). Left in place it is not merely useless but actively
+ * misleading, so it is swapped for this.
+ */
+const CLAUDE_CODE_TOOLS_SECTION = `Available tools:
+- Read: Read file contents (key param: file_path)
+- Write: Create or overwrite files (key params: file_path, content)
+- Edit: Make precise edits with exact text replacement (key params: file_path, old_string, new_string)
+- Bash: Execute bash commands (key param: command)
+- Grep: Search file contents for patterns (key params: pattern, path)
+- Glob: Find files by glob pattern (key params: pattern, path)
+
+In addition to the tools above, you may have access to other custom tools depending on the project.
+
+Guidelines:
+- Prefer Grep and Glob over Bash for file exploration (faster, respects .gitignore)
+- Use Read to examine files before editing
+- Use Edit for precise changes (old_string must match exactly)
+- Use Write only for new files or complete rewrites
+- When summarizing your actions, output plain text directly — do NOT use Bash to display what you did
+- Be concise in your responses
+- Show file paths clearly when working with files`;
+
+/**
+ * Swap pi's tool documentation for Claude Code's.
+ *
+ * Pi's prompt is a sequence of blank-line-separated blocks; the tool material
+ * runs from the `Available tools:` block through the `Guidelines:` block
+ * (verified against pi 0.84.2, where those are blocks 1 and 3 of 5). Both
+ * anchors must be present and in order, otherwise the prompt is returned
+ * untouched — if pi restyles its prompt the failure mode should be "kept the
+ * original", never a mangled one.
+ *
+ * Exported for tests.
+ */
+export function rewritePiToolSections(systemPrompt: string): string {
+  const blocks = systemPrompt.split("\n\n");
+
+  const start = blocks.findIndex((b) => b.startsWith("Available tools:"));
+  const end = blocks.findIndex((b) => b.startsWith("Guidelines:"));
+  if (start === -1 || end === -1 || end < start) return systemPrompt;
+
+  const kept = blocks.filter((_, i) => i < start || i > end);
+  // Reinstate the replacement where the originals were, so the intro still
+  // reads into it and anything after (pi's docs section) still follows.
+  kept.splice(start, 0, CLAUDE_CODE_TOOLS_SECTION);
+  return kept.join("\n\n");
+}
+
+/**
  * Builds the system prompt from the context's systemPrompt field,
  * appending AGENTS.md content if found (walking up from cwd, then global fallback).
  * Sanitizes .pi references to .claude for Claude Code compatibility.
+ *
+ * In `pi` mode the caller passes the prompt to `--system-prompt`, replacing
+ * Claude Code's own, so pi's tool sections are rewritten into Claude Code's
+ * names first. In `claude` mode the prompt is appended to Claude Code's and
+ * pi's wording is left exactly as pi wrote it.
  */
 export function buildSystemPrompt(
   context: { systemPrompt?: string; messages: any[] },
   cwd: string,
+  mode: SystemPromptMode = DEFAULT_SYSTEM_PROMPT_MODE,
 ): string {
   const parts: string[] = [];
 
   if (context.systemPrompt) {
-    parts.push(context.systemPrompt);
+    parts.push(
+      mode === "pi"
+        ? rewritePiToolSections(context.systemPrompt)
+        : context.systemPrompt,
+    );
   }
 
   // Look for AGENTS.md

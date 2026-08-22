@@ -26,6 +26,7 @@ import {
   buildSystemPrompt,
   buildResumePrompt,
 } from "./prompt-builder.js";
+import { resolveSystemPromptMode } from "./system-prompt-mode.js";
 import {
   spawnClaude,
   writeUserMessage,
@@ -124,9 +125,15 @@ export function streamViaCli(
       const prompt = resumeSessionId
         ? buildResumePrompt(context)
         : buildPrompt(context);
+      // Resolved per spawn rather than once at module load so a host can flip
+      // the setting between sessions without restarting pi. Only the
+      // session-creating turn carries a system prompt — the CLI keeps it for
+      // the life of the session — so switching mid-session takes effect on
+      // the next new session, not this one.
+      const systemPromptMode = resolveSystemPromptMode();
       const systemPrompt = resumeSessionId
         ? undefined
-        : buildSystemPrompt(context, cwd);
+        : buildSystemPrompt(context, cwd, systemPromptMode);
 
       // Compute effort level from reasoning options
       const effort = mapThinkingEffort(
@@ -143,6 +150,7 @@ export function streamViaCli(
         mcpConfigPath: options?.mcpConfigPath,
         resumeSessionId,
         newSessionId: !resumeSessionId ? options?.sessionId : undefined,
+        systemPromptMode,
       });
       const getStderr = captureStderr(proc);
 

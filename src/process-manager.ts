@@ -12,13 +12,19 @@ import { writeFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { ChildProcess } from "node:child_process";
+import {
+  DEFAULT_SYSTEM_PROMPT_MODE,
+  type SystemPromptMode,
+} from "./system-prompt-mode.js";
 
 /**
  * Spawn a Claude CLI subprocess with all required flags for stream-json communication.
  *
  * @param modelId - The model ID to pass via --model flag
- * @param systemPrompt - Optional system prompt appended via --append-system-prompt
- * @param options - Optional cwd, AbortSignal, and effort level
+ * @param systemPrompt - Optional system prompt. In `claude` mode it is appended
+ *   to Claude Code's own via --append-system-prompt; in `pi` mode it replaces
+ *   it via --system-prompt. See src/system-prompt-mode.ts.
+ * @param options - Optional cwd, AbortSignal, effort level and prompt mode
  * @returns The spawned ChildProcess with piped stdin/stdout/stderr
  */
 /** Truthy PI_CLAUDE_CLI_HERMETIC opts in to hermetic mode (see README). */
@@ -37,6 +43,7 @@ export function spawnClaude(
     mcpConfigPath?: string;
     resumeSessionId?: string;
     newSessionId?: string;
+    systemPromptMode?: SystemPromptMode;
   },
 ): ChildProcess {
   const args = [
@@ -73,13 +80,19 @@ export function spawnClaude(
 
   if (systemPrompt) {
     // Write system prompt to a temp file to avoid ENAMETOOLONG on Windows.
-    // Claude CLI's --append-system-prompt accepts a file path or literal text.
+    // Both flags accept a file path or literal text.
     const tmpFile = join(
       tmpdir(),
       `pi-claude-cli-sysprompt-${process.pid}.txt`,
     );
     writeFileSync(tmpFile, systemPrompt, "utf-8");
-    args.push("--append-system-prompt", tmpFile);
+    // `pi` mode replaces Claude Code's prompt outright; `claude` mode layers
+    // pi's on top of it. See src/system-prompt-mode.ts for the trade-off.
+    const mode = options?.systemPromptMode ?? DEFAULT_SYSTEM_PROMPT_MODE;
+    args.push(
+      mode === "pi" ? "--system-prompt" : "--append-system-prompt",
+      tmpFile,
+    );
   }
 
   if (options?.effort) {
