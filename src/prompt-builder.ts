@@ -141,75 +141,6 @@ function buildCustomToolResultPrompt(messages: any[]): string | null {
   return `${userMessage}\n\n[The ${last.toolName} tool was called and returned the following result]\n${toolResult}\n\nRespond to the user using the tool result above.`;
 }
 
-/**
- * Build a prompt for a resumed session.
- *
- * When resuming via --resume, the CLI already has the full conversation history
- * up through the most recent assistant turn it produced. We only need to send
- * the delta since that turn: trailing tool results for the last assistant
- * tool_use, and/or a new user message.
- *
- * Why anchor on the last assistant message rather than the last user message?
- * Pi's tool loop appends [user, assistant(toolUse), toolResult,
- * assistant(toolUse), toolResult, ...] — the only `user` entry stays at index 0
- * across many provider invocations. Anchoring there made every iteration replay
- * the entire transcript, and when that first user message carried an image the
- * image branch below returned early with just the image, so tool results never
- * reached the model at all. The model then re-issued the same tool call
- * indefinitely while each turn re-billed the whole accumulated context.
- *
- * Returns "" when there's nothing new to send (e.g. only an assistant message
- * exists in the context — can happen mid-shutdown).
- */
-export function buildResumePrompt(context: {
-  messages: any[];
-}): string | AnthropicContentBlock[] {
-  const messages = context.messages;
-  if (messages.length === 0) return "";
-
-  let lastAssistantIdx = -1;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role === "assistant") {
-      lastAssistantIdx = i;
-      break;
-    }
-  }
-
-  const newMessages = messages.slice(lastAssistantIdx + 1);
-  if (newMessages.length === 0) return "";
-
-  // If there are only tool results + one user message, build a combined prompt
-  const parts: string[] = [];
-  for (const msg of newMessages) {
-    if (msg.role === "toolResult") {
-      if (msg.toolName && isCustomToolName(msg.toolName)) {
-        parts.push(`TOOL RESULT (${msg.toolName}):`);
-      } else {
-        const claudeToolName = msg.toolName
-          ? mapPiToolNameToClaude(msg.toolName)
-          : "unknown";
-        parts.push(`TOOL RESULT (historical ${claudeToolName}):`);
-      }
-      parts.push(toolResultContentToText(msg.content));
-    } else if (msg.role === "user") {
-      // Check for images in the final user message
-      if (contentHasImages(msg.content)) {
-        const textSoFar = parts.join("\n");
-        const userContent = buildFinalUserContent(msg.content);
-        const result: AnthropicContentBlock[] = [];
-        if (textSoFar) {
-          result.push({ type: "text", text: textSoFar });
-        }
-        result.push(...userContent);
-        return result;
-      }
-      parts.push(userContentToText(msg.content));
-    }
-  }
-
-  return parts.join("\n") || "";
-}
-
 export function buildPrompt(context: {
   messages: any[];
 }): string | AnthropicContentBlock[] {
@@ -441,12 +372,22 @@ export function buildSystemPrompt(
     }
   }
 
-  // When conversation history has tool results, instruct Claude to use them
-  // instead of trying to re-call tools (which may not be available).
+  // The provider never resumes, so every turn replays the whole transcript and
+  // the model has to recognise its own completed work in it. Without this the
+  // model re-issues the tool call it just made and the loop never advances —
+  // the livelock recorded as issue #12.
+  //
+  // The wording matters. An earlier version said "Do NOT attempt to re-call
+  // tools that already have results", which was written for the first turn
+  // (where every result is genuinely historical). Mid-loop it reads as "stop
+  // calling tools" and fights the break-early design, which depends on the
+  // model proposing the NEXT call.
   if (context.messages?.some((m: any) => m.role === "toolResult")) {
     parts.push(
-      "IMPORTANT: The conversation history below contains tool results from previously executed tools. " +
-        "Use these results to answer the user's question. Do NOT attempt to re-call tools that already have results.",
+      "The conversation below is the transcript of this session so far, including tool calls you " +
+        "already made and the results they returned. Those calls have already run: their results are " +
+        "final and must not be requested again. Continue from the end of the transcript — either make " +
+        "the next tool call the task needs, or give the final answer if every step is done.",
     );
   }
 

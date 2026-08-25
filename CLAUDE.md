@@ -28,8 +28,8 @@ The request flow, entry to exit:
 
 1. **`index.ts`** — extension entry. Validates the CLI is present/authenticated, registers the provider exposing all `anthropic` models from pi's catalog, and lazily builds the MCP config on the first request (`getAllTools()` is not safe to call at load time). On `session_start` it force-activates every registered tool so pi will execute them, and stashes the `ctx` used to publish account status. Registration happens **twice** — `pi.registerProvider()` and `registerApiProvider()` from `@earendil-works/pi-ai/compat` — because pi 0.84 has two dispatch paths; drop the second and print mode and nested agent loops throw `No API provider registered`.
 2. **`src/provider.ts`** (`streamViaCli`) — the orchestrator. Builds the prompt, spawns the subprocess, writes the user message to stdin, reads stdout line-by-line, and drives the whole lifecycle (inactivity timeout, abort, cleanup). Returns an `AssistantMessageEventStream` that pi consumes.
-3. **`src/prompt-builder.ts`** — flattens pi's message history into the text/blocks prompt. First turn → full history via `buildPrompt`; resumed turns → only the new tail via `buildResumePrompt`. Also builds the system prompt (merges `AGENTS.md`, sanitizing `.pi` → `.claude`).
-4. **`src/process-manager.ts`** — spawns `claude` with the correct flags via `cross-spawn`, writes NDJSON to stdin, force-kills (SIGKILL), and keeps a registry of live subprocesses so they can all be reaped on exit.
+3. **`src/prompt-builder.ts`** — flattens pi's message history into the text/blocks prompt. Every turn sends the full history via `buildPrompt`; there is no delta path (see "No session resume" below). Also builds the system prompt (merges `AGENTS.md`, sanitizing `.pi` → `.claude`), including the mid-loop guidance that keeps the model advancing through the tool loop rather than repeating a call.
+4. **`src/process-manager.ts`** — spawns `claude` with the correct flags via `cross-spawn`, writes NDJSON to stdin, force-kills (SIGKILL), and keeps a registry of live subprocesses so they can all be reaped on exit. Each spawn writes its system prompt to its **own** temp file (returned as `proc.systemPromptFile`); the caller cleans up that exact path, because two `streamViaCli` calls can be in flight at once.
 5. **`src/stream-parser.ts`** — resilient NDJSON line parser; never throws, returns `null` for junk/debug/malformed lines.
 6. **`src/event-bridge.ts`** — translates each Claude API streaming event into pi stream events (`text_*`, `thinking_*`, `toolcall_*`) and accumulates the final `AssistantMessage` with usage/cost.
 7. **`src/control-handler.ts`** — answers the CLI's `can_use_tool` control requests.
@@ -51,14 +51,32 @@ Consequences to keep in mind when editing:
 - The stream terminates with a **`done`** event (never `error`) — pi's `extractResult()` treats `error` as a bare string and later calls `.content` on it, which crashes. `endStreamWithError` deliberately pushes a well-formed `done` with `content: []` instead.
 - The `done` event is pushed **after** readline closes (async), not inside `message_stop`; pushing it synchronously would let the CLI execute tools before the kill lands.
 
-### Session resume
+### No session resume
 
-pi passes a `sessionId` on every call. `provider.ts` resumes (`--resume <id>`, sending only the new tail via `buildResumePrompt`) **only when the conversation already contains a prior assistant turn from this provider** (`provider`/`api === "pi-claude-cli"`); otherwise it starts a fresh CLI session (`--session-id <id>`, full history via `buildPrompt`). This provider-aware check — not a bare `messages.length` test — is what keeps a mid-session `/model` switch from another provider from `--resume`-ing a CLI session that was never created (which fails silently as an empty message). Resuming also skips re-sending the system prompt, since it's already in the CLI's session context.
+pi passes a `sessionId` on every call. The provider **ignores it**: every spawn
+gets no `--resume` and no `--session-id`, and always sends the full flattened
+history from `buildPrompt`. The CLI's own session files are write-only scratch
+that nothing reads back.
 
-Two invariants here have each caused a real outage; both are explained at length in `docs/ARCHITECTURE.md`:
+This is not a simplification for its own sake — `--resume` is what poisoned the
+conversation. On resume the CLI splices a synthetic assistant turn reading
+`No response requested.` into any transcript ending on a user entry, which is
+exactly the shape pi's tool loop produces every turn. The model eventually
+imitates it and answers with that literal string, ending the session silently.
+The full account, with measurements, is in `docs/ARCHITECTURE.md` under
+"Why we never resume".
 
-- **`buildResumePrompt` anchors on the last _assistant_ message**, never the last user message. pi's tool loop leaves the only `user` entry at index 0, so anchoring there replays the entire transcript on every iteration. If a change makes the resume prompt grow with conversation length, it has regressed.
-- **A resume can miss.** Forks copy history into a new pi session id, so the heuristic says "resume" while the CLI cache is keyed to the old id. `streamViaCli` is a driver over `runOnce(forceFullReplay)`: a resume-miss aborts without touching pi's stream and retries once with a full replay under `--session-id`.
+Two consequences to keep in mind when editing:
+
+- **Full replay must not restart the tool loop.** `buildPrompt` used to run
+  only on first turns. Now it runs mid-loop, so the system prompt's guidance
+  about tool results has to tell the model to _continue_ from its own completed
+  work. Wording that reads as "stop calling tools" reproduces the issue #12
+  livelock — a live three-file task re-read the same file 27 times. Tests pin
+  both the new wording and the absence of the old.
+- **Cost moved.** The fixed prefix still caches across fresh session ids; the
+  conversation does not, so it is re-sent every turn. That is the accepted
+  trade, bounded by pi's auto-compaction.
 
 ### Episodes, not messages
 

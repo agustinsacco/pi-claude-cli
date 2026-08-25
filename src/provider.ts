@@ -21,13 +21,10 @@ import {
   type Model,
   type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
-import {
-  buildPrompt,
-  buildSystemPrompt,
-  buildResumePrompt,
-} from "./prompt-builder.js";
+import { buildPrompt, buildSystemPrompt } from "./prompt-builder.js";
 import { resolveSystemPromptMode } from "./system-prompt-mode.js";
 import {
+  type ChildProcessWithPromptFile,
   spawnClaude,
   writeUserMessage,
   cleanupProcess,
@@ -83,57 +80,33 @@ export function streamViaCli(
   options?: StreamViaCLiOptions,
 ): AssistantMessageEventStream {
   const stream = createAssistantMessageEventStream();
+  /** The temp system-prompt file this stream's spawn created, if any. */
+  let systemPromptFile: string | undefined;
 
   /**
-   * One subprocess attempt. Returns "resume-miss" (without touching the
-   * stream) when a --resume pointed at a CLI session that does not exist —
-   * forks copy pi history into a NEW session id, so the prior-provider-turn
-   * heuristic says resume while the CLI cache is keyed to the old id (#2).
-   * The driver below retries once with a full-history replay, which also
-   * re-registers the CLI cache under the current session id.
+   * One subprocess run: spawn, stream, clean up.
+   *
+   * Every run is a brand-new CLI session replaying pi's full history. See
+   * "Why we never resume" in docs/ARCHITECTURE.md — in short, `--resume`
+   * makes the CLI splice a synthetic `No response requested.` assistant turn
+   * into the replayed transcript, which the model eventually imitates.
    */
-  async function runOnce(
-    forceFullReplay: boolean,
-  ): Promise<"ok" | "resume-miss"> {
+  async function run(): Promise<void> {
     let proc: ReturnType<typeof spawnClaude> | undefined;
     let abortHandler: (() => void) | undefined;
-    let resumeMiss = false;
 
     try {
       const cwd = options?.cwd ?? process.cwd();
 
-      // Resume only when this conversation already contains a prior assistant
-      // turn produced by pi-claude-cli (which means a CLI session has been
-      // established under this session id). Otherwise — e.g. when the user
-      // just switched to pi-claude-cli from another provider mid session, or
-      // when this is the first turn — start a fresh CLI session via
-      // --session-id. Using --resume against an unknown id fails silently
-      // with "No conversation found with session ID" and produces an empty
-      // assistant message.
-      const hasPriorCliTurn = (context.messages as any[]).some(
-        (m) =>
-          m?.role === "assistant" &&
-          (m?.provider === "pi-claude-cli" || m?.api === "pi-claude-cli"),
-      );
-      const resumeSessionId =
-        !forceFullReplay && options?.sessionId && hasPriorCliTurn
-          ? options.sessionId
-          : undefined;
-
-      // Build prompt: if resuming, only send the latest user turn;
-      // otherwise build the full flattened conversation history
-      const prompt = resumeSessionId
-        ? buildResumePrompt(context)
-        : buildPrompt(context);
+      // Always the full flattened history. pi's own transcript is the only
+      // truthful record of the conversation; the CLI's session file is
+      // write-only scratch that nothing ever reads back.
+      const prompt = buildPrompt(context);
       // Resolved per spawn rather than once at module load so a host can flip
-      // the setting between sessions without restarting pi. Only the
-      // session-creating turn carries a system prompt — the CLI keeps it for
-      // the life of the session — so switching mid-session takes effect on
-      // the next new session, not this one.
+      // the setting between sessions without restarting pi. Every spawn
+      // creates a fresh CLI session, so every spawn carries the system prompt.
       const systemPromptMode = resolveSystemPromptMode();
-      const systemPrompt = resumeSessionId
-        ? undefined
-        : buildSystemPrompt(context, cwd, systemPromptMode);
+      const systemPrompt = buildSystemPrompt(context, cwd, systemPromptMode);
 
       // Compute effort level from reasoning options
       const effort = mapThinkingEffort(
@@ -143,15 +116,17 @@ export function streamViaCli(
       );
 
       // Spawn subprocess
+      // No --session-id either: the CLI refuses a second spawn under an id it
+      // has already seen ("Session ID <id> is already in use"), and since we
+      // never read these sessions back there is nothing to address them by.
       proc = spawnClaude(model.id, systemPrompt || undefined, {
         cwd,
         signal: options?.signal,
         effort,
         mcpConfigPath: options?.mcpConfigPath,
-        resumeSessionId,
-        newSessionId: !resumeSessionId ? options?.sessionId : undefined,
         systemPromptMode,
       });
+      systemPromptFile = (proc as ChildProcessWithPromptFile).systemPromptFile;
       const getStderr = captureStderr(proc);
 
       // Register in global process registry for teardown cleanup
@@ -218,7 +193,7 @@ export function streamViaCli(
 
         if (options.signal.aborted) {
           abortHandler();
-          return "ok";
+          return;
         }
         options.signal.addEventListener("abort", abortHandler, { once: true });
       }
@@ -328,9 +303,7 @@ export function streamViaCli(
           handleControlRequest(msg, proc!.stdin!);
         } else if (msg.type === "result") {
           // Surface every non-success result as an error so silent failures
-          // (e.g. subtype "error_during_execution" from --resume against an
-          // unknown session id, or any future error variant) don't get
-          // swallowed into an empty assistant message.
+          // don't get swallowed into an empty assistant message.
           const r: any = msg as any;
           const isError =
             r.subtype !== "success" ||
@@ -343,18 +316,7 @@ export function streamViaCli(
               (Array.isArray(r.errors) && r.errors.length > 0
                 ? r.errors.join("; ")
                 : `Claude CLI returned ${r.subtype ?? "non-success result"}`);
-            if (
-              resumeSessionId &&
-              /No conversation found with session ID/i.test(errMsg)
-            ) {
-              // Recoverable: the driver replays full history once. The CLI
-              // also exits non-zero after this result — silence this
-              // attempt's close/error handlers so the retry owns the stream.
-              resumeMiss = true;
-              broken = true;
-            } else {
-              endStreamWithError(errMsg);
-            }
+            endStreamWithError(errMsg);
           }
           if (!isError) {
             // Authoritative episode usage + final-answer safety net.
@@ -371,8 +333,6 @@ export function streamViaCli(
       await new Promise<void>((resolve) => {
         rl.on("close", resolve);
       });
-
-      if (resumeMiss) return "resume-miss";
 
       // Push done event after readline closes (async). Pushing synchronously
       // inside handleMessageStop prevents pi from executing tools.
@@ -404,9 +364,8 @@ export function streamViaCli(
         });
         stream.end();
       }
-      return "ok";
     } finally {
-      // Clean up this attempt's abort listener
+      // Clean up this run's abort listener
       if (options?.signal && abortHandler) {
         options.signal.removeEventListener("abort", abortHandler);
       }
@@ -415,13 +374,7 @@ export function streamViaCli(
 
   (async () => {
     try {
-      const outcome = await runOnce(false);
-      if (outcome === "resume-miss") {
-        console.error(
-          "[pi-claude-cli] CLI session missing for --resume — replaying full history under the current session id",
-        );
-        await runOnce(true);
-      }
+      await run();
     } catch (err: any) {
       stream.push({
         type: "error",
@@ -430,7 +383,7 @@ export function streamViaCli(
       } as any);
       stream.end();
     } finally {
-      cleanupSystemPromptFile();
+      cleanupSystemPromptFile(systemPromptFile);
     }
   })();
 

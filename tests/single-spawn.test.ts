@@ -120,7 +120,7 @@ function textEpisode(text: string): string[] {
   ];
 }
 
-describe("resume-miss fallback (issue #2)", () => {
+describe("single-spawn guarantee (was: resume-miss fallback, issue #2)", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.clearAllMocks();
@@ -130,43 +130,36 @@ describe("resume-miss fallback (issue #2)", () => {
     vi.useRealTimers();
   });
 
-  it("retries once with a full replay when --resume misses, and succeeds", async () => {
+  // Issue #2 was: a fork copies pi history under a new pi session id, so the
+  // provider would --resume a CLI session that never existed, get back
+  // "No conversation found with session ID", and retry once with a full
+  // replay. Nothing resumes any more, so the miss cannot happen and the retry
+  // driver is gone. What must hold now is simpler and stronger: exactly one
+  // spawn per stream, and every CLI error surfaced rather than swallowed.
+
+  it("spawns exactly once for a forked conversation, with no retry", async () => {
     streamViaCli(model, forkedContext, { sessionId: "forked-session-id" });
     await vi.advanceTimersByTimeAsync(0);
 
-    // Attempt 1 resumed and the CLI has no such session.
+    expect((spawn as any).mock.calls).toHaveLength(1);
+    expect((spawn as any).mock.calls[0][1]).not.toContain("--resume");
+
     const proc1 = (spawn as any).mock.results[0].value;
-    expect((spawn as any).mock.calls[0][1]).toContain("--resume");
-    proc1.stdout.write(RESUME_MISS_LINE);
-    await vi.advanceTimersByTimeAsync(0);
+    for (const line of textEpisode("FORKED-TURN")) {
+      proc1.stdout.write(line + "\n");
+      await vi.advanceTimersByTimeAsync(0);
+    }
     proc1.stdout.end();
     await vi.advanceTimersByTimeAsync(0);
 
-    // Attempt 2 replays full history under the current session id.
-    expect((spawn as any).mock.calls).toHaveLength(2);
-    const args2 = (spawn as any).mock.calls[1][1];
-    expect(args2).not.toContain("--resume");
-    expect(args2).toContain("--session-id");
-    expect(args2).toContain("forked-session-id");
-
-    const proc2 = (spawn as any).mock.results[1].value;
-    for (const line of textEpisode("FORKED-TURN")) {
-      proc2.stdout.write(line + "\n");
-      await vi.advanceTimersByTimeAsync(0);
-    }
-    proc2.stdout.end();
-    await vi.advanceTimersByTimeAsync(0);
-
+    expect((spawn as any).mock.calls).toHaveLength(1);
     const mockStream = MockAssistantMessageEventStream.mock.instances[0];
     const done = mockStream._events.find((e: any) => e.type === "done");
     expect(done).toBeDefined();
     expect(done.message.content[0].text).toBe("FORKED-TURN");
-    // The recoverable miss never surfaced as an error to the user.
-    const texts = done.message.content.map((c: any) => c.text ?? "");
-    expect(texts.join(" ")).not.toMatch(/No conversation found/);
   });
 
-  it("does not retry for unrelated errors on a resume attempt", async () => {
+  it("surfaces an unrelated CLI error without retrying", async () => {
     streamViaCli(model, forkedContext, { sessionId: "forked-session-id" });
     await vi.advanceTimersByTimeAsync(0);
 
@@ -185,9 +178,10 @@ describe("resume-miss fallback (issue #2)", () => {
     expect(done.message.content[0].text).toContain("boom");
   });
 
-  it("surfaces resume-miss text as an error when no resume was attempted", async () => {
-    // First turn: no prior provider message, so no --resume — the same error
-    // string must not trigger a pointless retry loop.
+  // The string that used to trigger the retry is now just an error like any
+  // other. If it ever appears it means something genuinely unexpected, and
+  // swallowing it into an empty assistant message is what we must not do.
+  it('surfaces "No conversation found" as an ordinary error, never a retry', async () => {
     streamViaCli(
       model,
       { messages: [{ role: "user", content: "hi" }] },

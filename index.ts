@@ -13,12 +13,17 @@ import {
   validateCliPresence,
   validateCliAuth,
   killAllProcesses,
+  cleanupAllSystemPromptFiles,
 } from "./src/process-manager.js";
 import { getCustomToolDefs, writeMcpConfig } from "./src/mcp-config.js";
 import { rewriteOverflowMessage } from "./src/overflow.js";
 
-// Kill all active Claude subprocesses on process exit to prevent orphans
-process.on("exit", killAllProcesses);
+// Kill all active Claude subprocesses on process exit to prevent orphans, and
+// remove any system-prompt temp files whose stream never reached its finally.
+process.on("exit", () => {
+  killAllProcesses();
+  cleanupAllSystemPromptFiles();
+});
 
 const PROVIDER_ID = "pi-claude-cli";
 

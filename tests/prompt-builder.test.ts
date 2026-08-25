@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { buildPrompt, buildResumePrompt } from "../src/prompt-builder";
+import { buildPrompt } from "../src/prompt-builder";
 
 describe("buildPrompt", () => {
   it("returns empty string for empty messages array", () => {
@@ -907,175 +907,21 @@ describe("buildSystemPrompt", () => {
       ],
     } as unknown as any;
     const result = bsp(context, "/some/project");
-    expect(result).toContain("IMPORTANT:");
-    expect(result).toContain("tool results");
+    expect(result).toContain("transcript of this session so far");
+    expect(result).toContain("Continue from the end of the transcript");
+
+    // The guidance must not read as "stop calling tools". Every turn replays
+    // the full transcript now, so this reaches the model mid-tool-loop, and
+    // break-early depends on it proposing the NEXT call. An earlier wording
+    // ("Do NOT attempt to re-call tools that already have results") made the
+    // model re-issue the same call forever — the issue #12 livelock, which a
+    // live multi-tool run reproduced in 27 iterations.
+    expect(result).not.toMatch(/do not attempt to re-call/i);
+    expect(result).toMatch(/next tool call/i);
   });
 });
 
-describe("buildResumePrompt", () => {
-  it("returns empty string for empty messages array", () => {
-    expect(buildResumePrompt({ messages: [] })).toBe("");
-  });
-
-  it("returns just the user message text for a single user message", () => {
-    const context = {
-      messages: [{ role: "user", content: "Hello world" }],
-    };
-    expect(buildResumePrompt(context)).toBe("Hello world");
-  });
-
-  it("extracts only the last user message from a multi-turn conversation", () => {
-    const context = {
-      messages: [
-        { role: "user", content: "First question" },
-        { role: "assistant", content: "First answer" },
-        { role: "user", content: "Follow-up question" },
-      ],
-    };
-    expect(buildResumePrompt(context)).toBe("Follow-up question");
-  });
-
-  it("includes tool results preceding the final user message", () => {
-    const context = {
-      messages: [
-        { role: "user", content: "Read a file" },
-        {
-          role: "assistant",
-          content: [
-            {
-              type: "toolCall",
-              name: "read",
-              arguments: { path: "/foo.ts" },
-            },
-          ],
-        },
-        {
-          role: "toolResult",
-          toolName: "read",
-          content: "file contents here",
-        },
-        { role: "user", content: "Now explain it" },
-      ],
-    };
-    const result = buildResumePrompt(context) as string;
-    expect(result).toContain("TOOL RESULT (historical Read):");
-    expect(result).toContain("file contents here");
-    expect(result).toContain("Now explain it");
-  });
-
-  it("includes multiple tool results preceding the final user message", () => {
-    const context = {
-      messages: [
-        { role: "user", content: "Read two files" },
-        {
-          role: "assistant",
-          content: [
-            {
-              type: "toolCall",
-              name: "read",
-              arguments: { path: "/a.ts" },
-            },
-            {
-              type: "toolCall",
-              name: "read",
-              arguments: { path: "/b.ts" },
-            },
-          ],
-        },
-        {
-          role: "toolResult",
-          toolName: "read",
-          content: "contents of a",
-        },
-        {
-          role: "toolResult",
-          toolName: "read",
-          content: "contents of b",
-        },
-        { role: "user", content: "Compare them" },
-      ],
-    };
-    const result = buildResumePrompt(context) as string;
-    expect(result).toContain("contents of a");
-    expect(result).toContain("contents of b");
-    expect(result).toContain("Compare them");
-  });
-
-  it("handles custom tool results with plain name format", () => {
-    const context = {
-      messages: [
-        { role: "user", content: "Deploy" },
-        {
-          role: "assistant",
-          content: [{ type: "toolCall", name: "deploy", arguments: {} }],
-        },
-        {
-          role: "toolResult",
-          toolName: "deploy",
-          content: "Deployed successfully",
-        },
-        { role: "user", content: "Check status" },
-      ],
-    };
-    const result = buildResumePrompt(context) as string;
-    expect(result).toContain("TOOL RESULT (deploy):");
-    expect(result).toContain("Deployed successfully");
-    expect(result).toContain("Check status");
-  });
-
-  it("returns empty string when no user message found", () => {
-    const context = {
-      messages: [{ role: "assistant", content: "Hello" }],
-    };
-    expect(buildResumePrompt(context)).toBe("");
-  });
-
-  it("handles content blocks array for user message", () => {
-    const context = {
-      messages: [
-        {
-          role: "user",
-          content: [{ type: "text", text: "Hello from blocks" }],
-        },
-      ],
-    };
-    expect(buildResumePrompt(context)).toBe("Hello from blocks");
-  });
-
-  it("handles images in the final user message by returning ContentBlock[]", () => {
-    const context = {
-      messages: [
-        {
-          role: "user",
-          content: [
-            { type: "text", text: "Look at this" },
-            {
-              type: "image",
-              data: "abc123",
-              mimeType: "image/png",
-            },
-          ],
-        },
-      ],
-    };
-    const result = buildResumePrompt(context);
-    expect(Array.isArray(result)).toBe(true);
-    expect((result as any[]).length).toBe(2);
-    expect((result as any[])[0].type).toBe("text");
-    expect((result as any[])[1].type).toBe("image");
-  });
-});
-
-/**
- * Pi drives tool use by appending to a single context whose only `user` entry
- * stays at index 0: [user, assistant(toolUse), toolResult, assistant(toolUse),
- * toolResult, ...]. Anchoring the resume delta on the last *user* message
- * therefore replayed the whole transcript every iteration — and when that first
- * user message carried an image, the image branch returned early with only the
- * image, so tool results never reached the model and it re-issued the same call
- * forever. These cover both shapes at increasing loop depth.
- */
-describe("buildResumePrompt — tool-loop delta (regression)", () => {
+describe("buildPrompt — tool-loop full replay (no-resume invariants)", () => {
   const toolLoop = (iterations: number, firstUserContent: any) => {
     const messages: any[] = [{ role: "user", content: firstUserContent }];
     for (let i = 0; i < iterations; i++) {
@@ -1098,49 +944,64 @@ describe("buildResumePrompt — tool-loop delta (regression)", () => {
     return { messages };
   };
 
-  it("sends only the newest tool result, not the whole transcript", () => {
-    const result = buildResumePrompt(toolLoop(4, "start the task")) as string;
-    expect(result).toContain("RESULT-3");
-    expect(result).not.toContain("RESULT-0");
-    expect(result).not.toContain("RESULT-1");
-    expect(result).not.toContain("RESULT-2");
-    // The original request lives in the CLI's own resumed session already.
-    expect(result).not.toContain("start the task");
+  // The provider never resumes, so the CLI has no prior context of its own:
+  // the whole conversation has to be in every prompt. This is the inverse of
+  // the old delta invariant and is deliberate — see docs/ARCHITECTURE.md.
+  it("replays the entire transcript, not just the newest tool result", () => {
+    const result = buildPrompt(toolLoop(4, "start the task")) as string;
+    expect(result).toContain("start the task");
+    for (const i of [0, 1, 2, 3]) {
+      expect(result).toContain(`RESULT-${i}`);
+    }
   });
 
-  it("keeps the delta flat as the tool loop deepens", () => {
+  it("grows with the tool loop, by design", () => {
     const sizes = [1, 5, 10, 25].map(
-      (n) =>
-        (buildResumePrompt(toolLoop(n, "start the task")) as string).length,
+      (n) => (buildPrompt(toolLoop(n, "start the task")) as string).length,
     );
-    // Every depth carries exactly one tool result, so the prompt must not grow
-    // with the transcript. Allow a couple of chars for the result index widening
-    // (RESULT-0 vs RESULT-24), which is the only legitimate variation.
-    expect(Math.max(...sizes) - Math.min(...sizes)).toBeLessThanOrEqual(2);
+    // Strictly increasing: each iteration adds a call and a result.
+    for (let i = 1; i < sizes.length; i++) {
+      expect(sizes[i]).toBeGreaterThan(sizes[i - 1]);
+    }
   });
 
-  it("does not re-send a pasted image on resumed tool-loop turns", () => {
+  // The livelock in #12 was caused by tool results never reaching the model
+  // when the first user message carried an image. Full replay must not
+  // reintroduce that, so this assertion carries over unchanged in spirit.
+  it("keeps every tool result even when the first user message has an image", () => {
     const withImage = [
       { type: "text", text: "look at this screenshot" },
       { type: "image", data: "A".repeat(4096), mimeType: "image/png" },
     ];
     for (const depth of [1, 5, 10]) {
-      const result = buildResumePrompt(toolLoop(depth, withImage));
-      expect(typeof result).toBe("string");
-      expect(result).not.toContain("AAAA");
-      // The tool result must survive — dropping it is what caused the livelock.
-      expect(result as string).toContain(`RESULT-${depth - 1}`);
+      const result = buildPrompt(toolLoop(depth, withImage));
+      // Image present => block form, so the history rides in a text block.
+      expect(Array.isArray(result)).toBe(true);
+      const asText = (result as any[])
+        .filter((b) => b.type === "text")
+        .map((b) => b.text)
+        .join("\n");
+      for (let i = 0; i < depth; i++) {
+        expect(asText).toContain(`RESULT-${i}`);
+      }
+      // And the image itself is passed through as a real image block.
+      expect((result as any[]).some((b) => b.type === "image")).toBe(true);
     }
   });
 
-  it("still sends a genuinely new user message after the last assistant turn", () => {
+  it("includes a genuinely new user message after the last assistant turn", () => {
     const context = toolLoop(3, "start the task");
     context.messages.push({
       role: "user",
       content: "actually, do this instead",
     });
-    const result = buildResumePrompt(context) as string;
+    const result = buildPrompt(context) as string;
     expect(result).toContain("RESULT-2");
     expect(result).toContain("actually, do this instead");
+  });
+
+  it("handles a transcript whose last entry is a tool result", () => {
+    const result = buildPrompt(toolLoop(2, "start the task")) as string;
+    expect(result.trimEnd().endsWith("RESULT-1")).toBe(true);
   });
 });

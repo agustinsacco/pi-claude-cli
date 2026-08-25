@@ -41,8 +41,6 @@ export function spawnClaude(
     signal?: AbortSignal;
     effort?: string;
     mcpConfigPath?: string;
-    resumeSessionId?: string;
-    newSessionId?: string;
     systemPromptMode?: SystemPromptMode;
   },
 ): ChildProcess {
@@ -70,22 +68,25 @@ export function spawnClaude(
     args.push("--strict-mcp-config", "--setting-sources", "");
   }
 
-  if (options?.resumeSessionId) {
-    // Resume an existing session — CLI loads prior conversation from disk
-    args.push("--resume", options.resumeSessionId);
-  } else if (options?.newSessionId) {
-    // First turn: create session with this ID so subsequent turns can --resume it
-    args.push("--session-id", options.newSessionId);
-  }
+  // Deliberately no --resume and no --session-id. Every spawn is a fresh CLI
+  // session replaying pi's full history; see "Why we never resume" in
+  // docs/ARCHITECTURE.md. Reintroducing --resume reintroduces the synthetic
+  // "No response requested." splice that this provider's turns used to inherit.
 
   if (systemPrompt) {
     // Write system prompt to a temp file to avoid ENAMETOOLONG on Windows.
     // Both flags accept a file path or literal text.
-    const tmpFile = join(
-      tmpdir(),
-      `pi-claude-cli-sysprompt-${process.pid}.txt`,
-    );
+    //
+    // The filename is unique per spawn, not per process. Every spawn now
+    // carries a system prompt (nothing resumes, so nothing inherits one), and
+    // two streamViaCli calls can be in flight at once — index.ts registers the
+    // same stream fn for nested agent loops and print mode. A shared per-PID
+    // path let one call overwrite another's prompt, or unlink it before the
+    // child had read it, in which case the CLI silently treats the *path* as
+    // the literal system prompt.
+    const tmpFile = systemPromptFilePath();
     writeFileSync(tmpFile, systemPrompt, "utf-8");
+    spawnedPromptFiles.add(tmpFile);
     // `pi` mode replaces Claude Code's prompt outright; `claude` mode layers
     // pi's on top of it. See src/system-prompt-mode.ts for the trade-off.
     const mode = options?.systemPromptMode ?? DEFAULT_SYSTEM_PROMPT_MODE;
@@ -93,6 +94,7 @@ export function spawnClaude(
       mode === "pi" ? "--system-prompt" : "--append-system-prompt",
       tmpFile,
     );
+    lastSystemPromptFile = tmpFile;
   }
 
   if (options?.effort) {
@@ -108,18 +110,62 @@ export function spawnClaude(
     cwd: options?.cwd ?? process.cwd(),
   });
 
+  // Carry the prompt file on the process so the caller cleans up exactly the
+  // one it created, rather than whichever was written most recently.
+  if (lastSystemPromptFile) {
+    (proc as ChildProcessWithPromptFile).systemPromptFile =
+      lastSystemPromptFile;
+  }
+
   return proc as ChildProcess;
 }
 
+/** A spawned CLI process, plus the temp prompt file written for it (if any). */
+export type ChildProcessWithPromptFile = ChildProcess & {
+  systemPromptFile?: string;
+};
+
+/** Monotonic suffix so two spawns in the same millisecond still differ. */
+let systemPromptFileSeq = 0;
+/** Every prompt file this process has written and not yet removed. */
+const spawnedPromptFiles = new Set<string>();
+/** The most recent one, for the no-argument cleanup form. */
+let lastSystemPromptFile: string | undefined;
+
+function systemPromptFilePath(): string {
+  systemPromptFileSeq += 1;
+  return join(
+    tmpdir(),
+    `pi-claude-cli-sysprompt-${process.pid}-${systemPromptFileSeq}.txt`,
+  );
+}
+
 /**
- * Clean up the temp system prompt file created by spawnClaude.
- * Safe to call multiple times or when no file exists.
+ * Remove a temp system prompt file written by spawnClaude.
+ *
+ * Pass the path a spawn reported to remove exactly that one. With no argument
+ * it removes the most recently written file, which is what a single-threaded
+ * caller wants; it must not remove *all* of them, or a concurrent spawn loses
+ * the prompt its child has not read yet.
+ *
+ * Safe to call repeatedly, and when the file is already gone.
  */
-export function cleanupSystemPromptFile(): void {
+export function cleanupSystemPromptFile(path?: string): void {
+  const target = path ?? lastSystemPromptFile;
+  if (!target) return;
   try {
-    unlinkSync(join(tmpdir(), `pi-claude-cli-sysprompt-${process.pid}.txt`));
+    unlinkSync(target);
   } catch {
-    // File doesn't exist or already deleted — ignore
+    // Already removed, or still held open by a child on Windows — ignore.
+  }
+  spawnedPromptFiles.delete(target);
+  if (target === lastSystemPromptFile) lastSystemPromptFile = undefined;
+}
+
+/** Remove any prompt files still on disk. Used on process teardown. */
+export function cleanupAllSystemPromptFiles(): void {
+  for (const file of [...spawnedPromptFiles]) {
+    cleanupSystemPromptFile(file);
   }
 }
 

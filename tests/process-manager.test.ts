@@ -26,8 +26,6 @@ vi.mock("node:child_process", () => ({
 import spawn from "cross-spawn";
 import { execSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
 import {
   spawnClaude,
   writeUserMessage,
@@ -39,6 +37,8 @@ import {
   registerProcess,
   killAllProcesses,
   cleanupSystemPromptFile,
+  cleanupAllSystemPromptFiles,
+  type ChildProcessWithPromptFile,
 } from "../src/process-manager";
 
 describe("spawnClaude", () => {
@@ -101,13 +101,52 @@ describe("spawnClaude", () => {
   });
 
   it("temp file contains the system prompt text", () => {
-    spawnClaude("claude-sonnet-4-5-20250929", "You are a helpful assistant.");
-    const tmpFile = join(
-      tmpdir(),
-      `pi-claude-cli-sysprompt-${process.pid}.txt`,
-    );
+    const proc = spawnClaude(
+      "claude-sonnet-4-5-20250929",
+      "You are a helpful assistant.",
+    ) as ChildProcessWithPromptFile;
+    const tmpFile = proc.systemPromptFile!;
+    expect(tmpFile).toBeDefined();
     expect(existsSync(tmpFile)).toBe(true);
     expect(readFileSync(tmpFile, "utf-8")).toBe("You are a helpful assistant.");
+    cleanupSystemPromptFile(tmpFile);
+  });
+
+  // Two streamViaCli calls can be in flight at once (index.ts registers the
+  // same stream fn for nested agent loops and print mode), and every spawn now
+  // carries a system prompt. A shared per-PID path let one call clobber or
+  // prematurely unlink another's prompt.
+  it("gives each spawn its own prompt file", () => {
+    const a = spawnClaude(
+      "claude-sonnet-4-5-20250929",
+      "PROMPT-A",
+    ) as ChildProcessWithPromptFile;
+    const b = spawnClaude(
+      "claude-sonnet-4-5-20250929",
+      "PROMPT-B",
+    ) as ChildProcessWithPromptFile;
+
+    expect(a.systemPromptFile).not.toBe(b.systemPromptFile);
+    expect(readFileSync(a.systemPromptFile!, "utf-8")).toBe("PROMPT-A");
+    expect(readFileSync(b.systemPromptFile!, "utf-8")).toBe("PROMPT-B");
+
+    // Finishing A must not remove the prompt B's child has yet to read.
+    cleanupSystemPromptFile(a.systemPromptFile);
+    expect(existsSync(a.systemPromptFile!)).toBe(false);
+    expect(existsSync(b.systemPromptFile!)).toBe(true);
+    cleanupSystemPromptFile(b.systemPromptFile);
+  });
+
+  it("passes each spawn its own prompt path on the command line", () => {
+    spawnClaude("claude-sonnet-4-5-20250929", "PROMPT-A");
+    spawnClaude("claude-sonnet-4-5-20250929", "PROMPT-B");
+    const argsA = (spawn as any).mock.calls[0][1] as string[];
+    const argsB = (spawn as any).mock.calls[1][1] as string[];
+    const pathA = argsA[argsA.indexOf("--append-system-prompt") + 1];
+    const pathB = argsB[argsB.indexOf("--append-system-prompt") + 1];
+    expect(pathA).not.toBe(pathB);
+    cleanupSystemPromptFile(pathA);
+    cleanupSystemPromptFile(pathB);
   });
 
   it("does not include --append-system-prompt when no system prompt", () => {
@@ -574,62 +613,104 @@ describe("process registry", () => {
   });
 });
 
-describe("resume session flag", () => {
+describe("session flags: never resume, never name a session", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it("includes --resume followed by session ID when resumeSessionId is provided", () => {
-    spawnClaude("claude-sonnet-4-5-20250929", undefined, {
-      resumeSessionId: "session-abc-123",
+  // The CLI splices a synthetic "No response requested." assistant turn into a
+  // resumed transcript whenever it ends on a user entry, and the model learns to
+  // imitate it. spawnClaude therefore has no way to ask for a resume at all.
+  it("never passes --resume, whatever options are given", () => {
+    spawnClaude("claude-sonnet-4-5-20250929", "a system prompt", {
+      cwd: "/tmp",
+      effort: "high",
+      mcpConfigPath: "/tmp/mcp.json",
+      systemPromptMode: "claude",
     });
-    const args = (spawn as any).mock.calls[0][1] as string[];
-
-    expect(args).toContain("--resume");
-    const idx = args.indexOf("--resume");
-    expect(args[idx + 1]).toBe("session-abc-123");
-  });
-
-  it("does NOT include --resume when resumeSessionId is undefined", () => {
-    spawnClaude("claude-sonnet-4-5-20250929");
     const args = (spawn as any).mock.calls[0][1] as string[];
 
     expect(args).not.toContain("--resume");
   });
 
-  it("includes both --resume and --effort when both are provided", () => {
-    spawnClaude("claude-sonnet-4-5-20250929", undefined, {
-      resumeSessionId: "session-abc",
+  // Reusing an id is a hard failure: "Error: Session ID <id> is already in use."
+  it("never passes --session-id, so a fresh session is created every spawn", () => {
+    spawnClaude("claude-sonnet-4-5-20250929", "a system prompt", {
+      cwd: "/tmp",
       effort: "high",
-    });
-    const args = (spawn as any).mock.calls[0][1] as string[];
-
-    expect(args).toContain("--resume");
-    expect(args).toContain("--effort");
-  });
-
-  it("includes both --resume and --mcp-config when both are provided", () => {
-    spawnClaude("claude-sonnet-4-5-20250929", undefined, {
-      resumeSessionId: "session-abc",
       mcpConfigPath: "/tmp/mcp.json",
     });
     const args = (spawn as any).mock.calls[0][1] as string[];
 
-    expect(args).toContain("--resume");
+    expect(args).not.toContain("--session-id");
+  });
+
+  it("emits no session-addressing flag across many spawns", () => {
+    for (let i = 0; i < 5; i++) {
+      spawnClaude("claude-sonnet-4-5-20250929", undefined, { effort: "low" });
+    }
+    for (const call of (spawn as any).mock.calls) {
+      const args = call[1] as string[];
+      expect(args).not.toContain("--resume");
+      expect(args).not.toContain("--session-id");
+    }
+  });
+
+  it("still passes the other flags it is responsible for", () => {
+    spawnClaude("claude-sonnet-4-5-20250929", undefined, {
+      effort: "high",
+      mcpConfigPath: "/tmp/mcp.json",
+    });
+    const args = (spawn as any).mock.calls[0][1] as string[];
+
+    expect(args).toContain("--effort");
     expect(args).toContain("--mcp-config");
+    expect(args).toContain("--model");
   });
 });
 
 describe("cleanupSystemPromptFile", () => {
-  const tmpFile = join(tmpdir(), `pi-claude-cli-sysprompt-${process.pid}.txt`);
-
   it("deletes the temp file when it exists", () => {
-    // Create the file by spawning with a system prompt
-    spawnClaude("claude-sonnet-4-5-20250929", "test prompt");
+    const proc = spawnClaude(
+      "claude-sonnet-4-5-20250929",
+      "test prompt",
+    ) as ChildProcessWithPromptFile;
+    const tmpFile = proc.systemPromptFile!;
     expect(existsSync(tmpFile)).toBe(true);
 
-    cleanupSystemPromptFile();
+    cleanupSystemPromptFile(tmpFile);
     expect(existsSync(tmpFile)).toBe(false);
+  });
+
+  it("with no argument removes the most recent file only", () => {
+    const a = spawnClaude(
+      "claude-sonnet-4-5-20250929",
+      "A",
+    ) as ChildProcessWithPromptFile;
+    const b = spawnClaude(
+      "claude-sonnet-4-5-20250929",
+      "B",
+    ) as ChildProcessWithPromptFile;
+
+    cleanupSystemPromptFile();
+    expect(existsSync(b.systemPromptFile!)).toBe(false);
+    expect(existsSync(a.systemPromptFile!)).toBe(true);
+    cleanupSystemPromptFile(a.systemPromptFile);
+  });
+
+  it("cleanupAllSystemPromptFiles removes every outstanding file", () => {
+    const a = spawnClaude(
+      "claude-sonnet-4-5-20250929",
+      "A",
+    ) as ChildProcessWithPromptFile;
+    const b = spawnClaude(
+      "claude-sonnet-4-5-20250929",
+      "B",
+    ) as ChildProcessWithPromptFile;
+
+    cleanupAllSystemPromptFiles();
+    expect(existsSync(a.systemPromptFile!)).toBe(false);
+    expect(existsSync(b.systemPromptFile!)).toBe(false);
   });
 
   it("does not throw when file does not exist", () => {

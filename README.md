@@ -12,7 +12,7 @@ A [pi](https://github.com/earendil-works/pi) extension that routes LLM calls thr
 
 ## How it works
 
-The extension registers as a custom pi provider exposing all Claude models. Each request spawns a `claude -p` subprocess using the stream-json wire protocol, with `--resume` on follow-up turns to reuse the CLI's session state instead of replaying full history. Claude proposes tool calls, pi executes them natively. Custom pi tools are exposed to Claude via a schema-only MCP server.
+The extension registers as a custom pi provider exposing all Claude models. Each request spawns a fresh `claude -p` subprocess using the stream-json wire protocol, replaying pi's full conversation history every turn — the CLI's own session state is never resumed (see `docs/ARCHITECTURE.md`, "Why we never resume"). Claude proposes tool calls, pi executes them natively. Custom pi tools are exposed to Claude via a schema-only MCP server.
 
 ## Requirements
 
@@ -44,7 +44,7 @@ Requires the `claude` binary on your login-shell PATH (`npm install -g @anthropi
 - Maps tool names and arguments bidirectionally between Claude and pi
 - Exposes custom pi tools to Claude via MCP (schema-only, no execution)
 - Break-early pattern prevents Claude CLI from auto-executing tools
-- Session resume via `--resume` eliminates history replay on follow-up turns
+- Full history replay every turn, so the CLI never resumes a transcript it would corrupt
 - Reports account rate-limit state (window, reset, overage) to the front-end
   on the `claude-rate-limit` status key — never mixed into turn content
 - Configurable thinking effort across the full ladder (low to max) for all models, with elevated mapping for Opus

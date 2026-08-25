@@ -1792,169 +1792,162 @@ describe("streamViaCli", () => {
     });
   });
 
-  describe("session resume via options.sessionId", () => {
-    it("passes --resume when sessionId option is provided on subsequent turn", async () => {
-      const model = mockModels[0] as any;
+  describe("never resumes a CLI session", () => {
+    // Regression guard for the synthetic-filler failure. On --resume the CLI
+    // splices an assistant turn reading "No response requested." into the
+    // replayed transcript whenever it ends on a user entry; the model learns
+    // to imitate it and eventually emits it as a real answer, which silently
+    // ends the session. The provider therefore never resumes.
+    const cliAssistant = (text: string) => ({
+      role: "assistant",
+      content: text,
+      provider: "pi-claude-cli",
+      api: "pi-claude-cli",
+    });
+
+    const drain = async () => {
+      const proc = (spawn as any).mock.results[0].value;
+      proc.stdout.end();
+      await vi.advanceTimersByTimeAsync(100);
+    };
+
+    const argsOfFirstSpawn = () => (spawn as any).mock.calls[0][1] as string[];
+
+    it("does not pass --resume even with a sessionId and a prior pi-claude-cli turn", async () => {
       const context = {
         messages: [
           { role: "user", content: "Hello" },
-          {
-            role: "assistant",
-            content: "Hi",
-            provider: "pi-claude-cli",
-            api: "pi-claude-cli",
-          },
+          cliAssistant("Hi"),
           { role: "user", content: "Follow-up" },
         ],
       };
 
-      streamViaCli(model, context, { sessionId: "sess-abc-123" } as any);
+      streamViaCli(mockModels[0] as any, context, {
+        sessionId: "sess-abc-123",
+      } as any);
       await vi.advanceTimersByTimeAsync(0);
 
-      const args = (spawn as any).mock.calls[0][1] as string[];
-      expect(args).toContain("--resume");
-      const idx = args.indexOf("--resume");
-      expect(args[idx + 1]).toBe("sess-abc-123");
-
-      // Clean up
-      const proc = (spawn as any).mock.results[0].value;
-      proc.stdout.end();
-      await vi.advanceTimersByTimeAsync(100);
+      expect(argsOfFirstSpawn()).not.toContain("--resume");
+      await drain();
     });
 
-    it("passes --session-id on first turn when sessionId provided", async () => {
-      const model = mockModels[0] as any;
-      const context = {
-        messages: [{ role: "user", content: "Hello" }],
-      };
+    it("does not pass --session-id, so each spawn creates a fresh CLI session", async () => {
+      const context = { messages: [{ role: "user", content: "Hello" }] };
 
-      streamViaCli(model, context, { sessionId: "sess-new" } as any);
+      streamViaCli(mockModels[0] as any, context, {
+        sessionId: "sess-abc-123",
+      } as any);
       await vi.advanceTimersByTimeAsync(0);
 
-      const args = (spawn as any).mock.calls[0][1] as string[];
-      expect(args).not.toContain("--resume");
-      expect(args).toContain("--session-id");
-      const idx = args.indexOf("--session-id");
-      expect(args[idx + 1]).toBe("sess-new");
-
-      // Clean up
-      const proc = (spawn as any).mock.results[0].value;
-      proc.stdout.end();
-      await vi.advanceTimersByTimeAsync(100);
+      expect(argsOfFirstSpawn()).not.toContain("--session-id");
+      await drain();
     });
 
-    it("does not pass --resume or --session-id when no sessionId option", async () => {
-      const model = mockModels[0] as any;
-      const context = {
-        messages: [{ role: "user", content: "Hello" }],
-      };
-
-      streamViaCli(model, context);
-      await vi.advanceTimersByTimeAsync(0);
-
-      const args = (spawn as any).mock.calls[0][1] as string[];
-      expect(args).not.toContain("--resume");
-      expect(args).not.toContain("--session-id");
-
-      // Clean up
-      const proc = (spawn as any).mock.results[0].value;
-      proc.stdout.end();
-      await vi.advanceTimersByTimeAsync(100);
-    });
-
-    it("uses buildResumePrompt when sessionId is provided (sends only new content)", async () => {
-      const model = mockModels[0] as any;
+    it("sends the full history on later turns, not a delta", async () => {
       const context = {
         messages: [
-          { role: "user", content: "first message" },
-          {
-            role: "assistant",
-            content: "response",
-            provider: "pi-claude-cli",
-            api: "pi-claude-cli",
-          },
-          { role: "user", content: "follow-up" },
+          { role: "user", content: "FIRST-MESSAGE" },
+          cliAssistant("MIDDLE-ANSWER"),
+          { role: "user", content: "LATEST-MESSAGE" },
         ],
       };
 
-      streamViaCli(model, context, { sessionId: "sess-resume" } as any);
+      streamViaCli(mockModels[0] as any, context, {
+        sessionId: "sess-abc-123",
+      } as any);
       await vi.advanceTimersByTimeAsync(0);
 
       const proc = (spawn as any).mock.results[0].value;
-      const written = proc.stdin.write.mock.calls[0][0] as string;
-      const parsed = JSON.parse(written.trim());
-      // Should only contain the latest user message, not full history
-      expect(parsed.message.content).toBe("follow-up");
+      const written = (proc.stdin.write as any).mock.calls[0][0] as string;
+      const sent = JSON.parse(written).message.content as string;
 
-      // Clean up
-      proc.stdout.end();
-      await vi.advanceTimersByTimeAsync(100);
+      expect(sent).toContain("FIRST-MESSAGE");
+      expect(sent).toContain("MIDDLE-ANSWER");
+      expect(sent).toContain("LATEST-MESSAGE");
+      await drain();
     });
 
-    it("does not pass system prompt when resuming", async () => {
-      const model = mockModels[0] as any;
+    it("sends the system prompt on later turns too", async () => {
+      const context = {
+        systemPrompt: "SYSTEM-PROMPT-MARKER",
+        messages: [
+          { role: "user", content: "Hello" },
+          cliAssistant("Hi"),
+          { role: "user", content: "Follow-up" },
+        ],
+      };
+
+      streamViaCli(mockModels[0] as any, context, {
+        sessionId: "sess-abc-123",
+      } as any);
+      await vi.advanceTimersByTimeAsync(0);
+
+      const args = argsOfFirstSpawn();
+      const hasPromptFlag =
+        args.includes("--append-system-prompt") ||
+        args.includes("--system-prompt");
+      expect(hasPromptFlag).toBe(true);
+      await drain();
+    });
+
+    it("behaves identically when prior turns came from another provider", async () => {
       const context = {
         messages: [
           { role: "user", content: "Hello" },
-          {
-            role: "assistant",
-            content: "Hi",
-            provider: "pi-claude-cli",
-            api: "pi-claude-cli",
-          },
-          { role: "user", content: "follow-up" },
+          { role: "assistant", content: "Hi", provider: "anthropic" },
+          { role: "user", content: "Follow-up" },
         ],
-        systemPrompt: "Be helpful",
       };
 
-      streamViaCli(model, context, { sessionId: "sess-resume" } as any);
+      streamViaCli(mockModels[0] as any, context, {
+        sessionId: "sess-abc-123",
+      } as any);
       await vi.advanceTimersByTimeAsync(0);
 
-      const args = (spawn as any).mock.calls[0][1] as string[];
-      expect(args).toContain("--resume");
-      expect(args).not.toContain("--append-system-prompt");
-
-      // Clean up
-      const proc = (spawn as any).mock.results[0].value;
-      proc.stdout.end();
-      await vi.advanceTimersByTimeAsync(100);
+      const args = argsOfFirstSpawn();
+      expect(args).not.toContain("--resume");
+      expect(args).not.toContain("--session-id");
+      await drain();
     });
 
-    it("uses --session-id (not --resume) when prior assistant turns are from a different provider", async () => {
-      // Regression test: switching to pi-claude-cli mid-session from another
-      // provider must not --resume a CLI session that was never created,
-      // because `claude --resume <unknown>` fails silently and pi receives
-      // an empty assistant message.
-      const model = mockModels[0] as any;
+    it("needs no retry for a forked session (the old resume-miss case)", async () => {
+      // A fork copies pi history under a NEW pi session id, so the old code
+      // would --resume a CLI session that never existed, then retry. With no
+      // resume there is nothing to miss: one spawn, full history.
       const context = {
         messages: [
-          { role: "user", content: "earlier prompt" },
-          {
-            role: "assistant",
-            content: "earlier reply",
-            provider: "anthropic",
-            api: "anthropic",
-          },
-          { role: "user", content: "first pi-claude-cli prompt" },
+          { role: "user", content: "FORKED-HISTORY" },
+          cliAssistant("earlier answer"),
+          { role: "user", content: "continue" },
         ],
-        systemPrompt: "Be helpful",
       };
 
-      streamViaCli(model, context, { sessionId: "sess-cross" } as any);
+      streamViaCli(mockModels[0] as any, context, {
+        sessionId: "brand-new-fork-id",
+      } as any);
       await vi.advanceTimersByTimeAsync(0);
 
-      const args = (spawn as any).mock.calls[0][1] as string[];
-      expect(args).not.toContain("--resume");
-      expect(args).toContain("--session-id");
-      const idx = args.indexOf("--session-id");
-      expect(args[idx + 1]).toBe("sess-cross");
-      // Fresh session must send the system prompt and full history.
-      expect(args).toContain("--append-system-prompt");
+      expect((spawn as any).mock.calls.length).toBe(1);
+      await drain();
+      expect((spawn as any).mock.calls.length).toBe(1);
+    });
 
-      // Clean up
-      const proc = (spawn as any).mock.results[0].value;
-      proc.stdout.end();
-      await vi.advanceTimersByTimeAsync(100);
+    it("does not resume when no sessionId option is given at all", async () => {
+      const context = {
+        messages: [
+          { role: "user", content: "Hello" },
+          cliAssistant("Hi"),
+          { role: "user", content: "Follow-up" },
+        ],
+      };
+
+      streamViaCli(mockModels[0] as any, context);
+      await vi.advanceTimersByTimeAsync(0);
+
+      const args = argsOfFirstSpawn();
+      expect(args).not.toContain("--resume");
+      expect(args).not.toContain("--session-id");
+      await drain();
     });
   });
 

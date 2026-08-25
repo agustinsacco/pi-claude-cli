@@ -32,7 +32,7 @@ effort range (through `max`) is selectable.
 ```
 pi agent loop
   └─ streamSimple(model, context, options)
-       ├─ prompt-builder  → flattened history (first turn) or delta (resume)
+       ├─ prompt-builder  → flattened history (every turn; never a delta)
        ├─ process-manager → spawn claude -p --output-format stream-json …
        ├─ stream-parser   → NDJSON lines (never throws)
        ├─ event-bridge    → pi stream events (text/thinking/toolcall deltas)
@@ -57,7 +57,7 @@ Windows `ENAMETOOLONG`).
 claude -p --input-format stream-json --output-format stream-json
        --verbose --include-partial-messages
        --model <id> --permission-prompt-tool stdio
-       (--session-id <pi session id> | --resume <pi session id>)
+       (no --session-id, no --resume — a fresh CLI session per spawn)
        [--effort <level>] [--mcp-config <tmp>]
        [--strict-mcp-config --setting-sources ""]   # hermetic mode
 ```
@@ -190,46 +190,84 @@ suspenders are **break-early** in `provider.ts`: at the first top-level
 SIGKILLed before Claude Code's executor can act. A `broken` flag is set
 _before_ closing the reader so buffered lines cannot slip through.
 
-## Session model: two ledgers
+## Session model: one ledger
 
-pi's session JSONL is the **only** authoritative record. The CLI session is
-a disposable cache keyed by pi's session id.
+pi's session JSONL is the **only** record of the conversation. The CLI's
+session file is write-only scratch: every spawn creates a fresh one, nothing
+ever reads one back, and deleting them all changes nothing.
 
-- First provider turn: `--session-id <pi id>` creates the CLI session.
-- Later turns: `--resume <pi id>` plus a **delta** prompt (only what follows
-  the last assistant turn) — this is also what keeps Anthropic's prompt
-  cache warm.
-- Resume is only attempted when the conversation already contains an
-  assistant turn from this provider (`hasPriorCliTurn`).
-- **Resume miss** (forks copy history into a _new_ pi session id, so the
-  heuristic says resume while the CLI cache is keyed to the old id): the
-  attempt aborts without touching pi's stream and the driver retries once
-  with a full-history replay under `--session-id`, which re-registers the
-  cache. Subsequent turns resume normally.
+- Every turn: no `--resume`, no `--session-id`, and the full flattened history
+  from `buildPrompt`.
+- The CLI generates its own session id per spawn. We cannot reuse one — a
+  second spawn under a known id fails with
+  `Error: Session ID <id> is already in use.`
+- Forking, switching models mid-session, or switching providers therefore need
+  no special handling at all. There is no cache to miss.
 
-Switching models mid-session, forking, or losing the CLI cache therefore
-costs one full replay — never a lost turn.
+Cost of this: one CLI session file per turn accumulates under
+`~/.claude/projects/<mangled cwd>/`. They are inert, but they are not free
+disk.
 
-### The delta anchor is load-bearing (0.4.6)
+### Why we never resume (0.4.8)
 
-`buildResumePrompt` anchors on the **last assistant message** and sends only
-what follows it. It must not anchor on the last _user_ message: pi's tool
-loop appends `[user, assistant(toolUse), toolResult, assistant(toolUse),
-toolResult, …]`, so the single `user` entry stays at index 0 for the life of
-the loop, and anchoring there replays the whole transcript on **every
-iteration** — content the CLI already holds.
+`--resume` is not a neutral "continue this conversation" flag. When the CLI
+replays a transcript whose last non-system entry is a `user` entry, it
+**splices in a synthetic assistant turn** whose entire content is the string
+`No response requested.` (constant `Ute` in claude 2.1.231; no env override —
+`CLAUDE_CODE_RESUME_PROMPT` renames only the separate "Continue from where you
+left off." string). A trailing `is_error` tool result also classifies the tail
+as an interrupted turn and pushes that second string ahead of the splice.
 
-That bug was expensive rather than visible, and it compounded: when the
-first user message carried an image, the image branch returned early with
-just the image and discarded every tool result, so the model never saw any
-tool output and re-issued the same call indefinitely. One observed session
-made 66 API calls of which 65 produced no work, transmitted one screenshot
-48 times, and peaked at 1.44M tokens of context per call — while looking,
-from the outside, like a slow session.
+pi's tool loop ends every provider turn on exactly that shape, so this
+provider used to collect one filler pair per turn. In a captured 24-turn
+session, 21 of 23 assistant entries in the CLI transcript were that synthetic
+filler — and then the model imitated it: two real `end_turn` responses whose
+whole output was `No response requested.`, seven output tokens each. The
+second one ended the session, silently, with the user's work undelivered.
 
-The invariant to preserve: **delta size stays flat as the tool loop
-deepens.** If a change makes the resume prompt grow with conversation
-length, it has regressed.
+Killing later does not help: on resume the CLI **drops** any assistant message
+whose `tool_use` blocks are all unresolved, which re-exposes a user tail and
+fires the splice again. Repairing the tail does not help either — a probe that
+rewrote it into a clean, complete tool round still got the pair spliced.
+
+The only reliable fix is to never hand the CLI a transcript to replay.
+
+### What replay costs, measured
+
+Measured on haiku, fresh session id per turn:
+
+| turn | cache_read | cache_write |
+| ---- | ---------- | ----------- |
+| 1    | 23,583     | 10,019      |
+| 2    | 23,583     | 10,041      |
+| 3    | 23,583     | 10,046      |
+
+The fixed prefix (system prompt + tool schemas) still caches across fresh
+session ids. The conversation does not — it is re-sent every turn. `--resume`
+cached the history instead (late turns in the captured session read 123k and
+wrote 1k). So this trades tokens for correctness, deliberately, and pi's
+auto-compaction is what bounds the growth.
+
+### Full replay must not restart the tool loop (issue #12, and its return)
+
+`buildPrompt` was historically only ever used on the first turn. Making it the
+only path exposed that a flattened transcript is not self-evidently the
+model's own work.
+
+The system prompt used to append, whenever any tool result existed:
+
+> IMPORTANT: … Do NOT attempt to re-call tools that already have results.
+
+Written for a first turn, where every result is genuinely historical. Mid-loop
+it reads as "stop calling tools" and fights break-early, which needs the model
+to propose the **next** call. With it in place, a live three-file task
+re-issued `read one.txt` **27 times** and never advanced — the same livelock
+shape as 0.4.6's, from a different cause.
+
+The replacement tells the model the transcript is its own completed work and
+to continue from the end of it. The invariant now: **the guidance must never
+read as "stop calling tools"**, and `tests/prompt-builder.test.ts` asserts
+both the new wording and the absence of the old.
 
 ## Errors and recovery
 
@@ -339,6 +377,7 @@ fires, and the turn looks truncated. This was the root cause behind every
 | 0.4.4   | Lazy thinking materialization (no empty blocks for encrypted thinking); explicit `contentIndex` per tracked block                   |
 | 0.4.5   | `rate_limit_event` → `claude-rate-limit` status key for front-ends                                                                  |
 | 0.4.6   | Resume delta anchors on the last **assistant** message — stops full-transcript replay on every tool iteration                       |
+| 0.4.8   | Never resume: no `--resume`, no `--session-id`, full replay every turn — removes the synthetic `No response requested.` splice      |
 
 ## Testing
 
