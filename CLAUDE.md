@@ -36,29 +36,63 @@ The request flow, entry to exit:
 8. **`src/tool-mapping.ts`** — the single source of truth for name/argument translation between Claude (`Read`, `Write`, `Glob`…) and pi (`read`, `write`, `find`…). All lookup maps derive from the `TOOL_MAPPINGS` array.
 9. **`src/thinking-config.ts`** — maps pi's `ThinkingLevel` to the CLI's `--effort` flag.
 
-### The break-early pattern (the central, non-obvious idea)
+### Observer mode (the central idea)
 
-pi must execute tools itself; the Claude CLI would otherwise execute them. So the CLI is used only to _propose_ tool calls, never to run them:
+The CLI is a first-class agent, not a bare model. It owns its loop, its tools
+and its session; pi is the system of record and an observer of the stream
+(docs/SPEC-observer-mode.md). Do not push pi's agenda onto the CLI — where pi
+needs a say, use the CLI's extension points (hooks via `PI_CLAUDE_CLI_SETTINGS`,
+MCP), never process surgery.
 
-- Custom pi tools are exposed to the CLI through a **schema-only MCP server** (`src/mcp-schema-server.cjs`, wired up by `src/mcp-config.ts`). It answers `initialize` and `tools/list` only — `tools/call` is intentionally never implemented.
-- In `provider.ts`, when a top-level `tool_use` block for a pi-known tool is seen, at the next `message_stop` the subprocess is **force-killed before the CLI can execute the tool** (`broken = true`, then `forceKillProcess` + `rl.close()`). pi then runs the tool and the next turn resumes the CLI session with the result.
-- `control-handler.ts` complements this: custom MCP tools (`mcp__custom-tools__*`) get `behavior: "deny"` so pi owns them; everything else (built-in and user MCP tools) is allowed.
+- **Built-in and CLI-side tools run natively.** They surface to pi as
+  `[Claude Code · Name {args}]` marker text blocks (a wire contract front-ends
+  parse), never as pi toolCall blocks, and never end the turn early.
+- **Handoff tools are the one exception.** Custom pi tools
+  (`mcp__custom-tools__*`, advertised by the schema-only MCP server
+  `src/mcp-schema-server.cjs`) are pi's to execute. When the model calls one,
+  the provider sends a clean `interrupt` control request at `message_stop`
+  (`sendInterrupt` — NEVER `forceKillProcess`), emits the pi toolCall, and ends
+  the stream `stopReason: toolUse`. pi executes (its hooks fire), and the next
+  turn resumes with the result. The interrupted turn's `result` envelope is
+  `error_during_execution` **by design** — expected, not an error.
+- **Why never SIGKILL a healthy turn:** a kill truncates the CLI's session
+  file before the assistant turn is written; every later `--resume` then
+  splices in a synthetic `No response requested.` assistant turn, which the
+  model eventually imitates, silently ending sessions. This happened in
+  production; the whole design exists to prevent it. Abort is interrupt-first
+  with a 2s SIGKILL backstop.
+- `isHandoffClaudeTool` (custom prefix only) is the gate for both the
+  interrupt decision and toolCall emission. `isPiKnownClaudeTool` remains only
+  for name translation contexts.
 
-Consequences to keep in mind when editing:
+### Session model: one CLI session per pi session
 
-- **Only top-level events matter.** Events with `parent_tool_use_id` are sub-agent internals and must be filtered out (both for forwarding and for the break-early decision).
-- **`isPiKnownClaudeTool`** is the gate: built-in mapped tools and `mcp__custom-tools__*` are "known"; internal CLI tools (`Task`, `Agent`, `ToolSearch`, …) are not, and must never be surfaced to pi as **tool calls** — the CLI executes those itself. They are not silent, though: they are emitted as `[Claude Code · Name {args}]` marker text blocks, which front-ends parse. That string is a wire contract, not cosmetics (see `docs/ARCHITECTURE.md`).
-- The stream terminates with a **`done`** event (never `error`) — pi's `extractResult()` treats `error` as a bare string and later calls `.content` on it, which crashes. `endStreamWithError` deliberately pushes a well-formed `done` with `content: []` instead.
-- The `done` event is pushed **after** readline closes (async), not inside `message_stop`; pushing it synchronously would let the CLI execute tools before the kill lands.
+The sidecar `~/.pi/agent/pi-claude-cli/session-map.json` (override:
+`PI_CLAUDE_CLI_STATE_DIR`) maps pi session id → CLI session id
+(`src/session-map.ts`). Per turn:
 
-### Session resume
+- **Resume** (`--resume <cliId>`) when a mapping exists and the CLI session is
+  not stale — send only the delta via `buildResumePrompt` (messages after the
+  last assistant turn), no system prompt.
+- **Create/import** otherwise: fresh provider-minted UUID (`--session-id`),
+  full history via `buildPrompt`, system prompt attached, mapping recorded.
+  Never reuse pi's session id — the CLI refuses an id it has seen
+  ("Session ID already in use"), and forks copy pi ids.
+- **Stale** = an assistant turn from another provider follows (or replaces)
+  our last one (`cliSessionIsStale`): the CLI never saw that exchange, so
+  reimport. A failed turn clears the mapping too — a turn that dies can leave
+  the CLI transcript ending on a user entry, and resuming that splices filler.
+- **Resume miss** ("No conversation found with session ID") clears the mapping
+  and the driver retries once through the import path.
 
-pi passes a `sessionId` on every call. `provider.ts` resumes (`--resume <id>`, sending only the new tail via `buildResumePrompt`) **only when the conversation already contains a prior assistant turn from this provider** (`provider`/`api === "pi-claude-cli"`); otherwise it starts a fresh CLI session (`--session-id <id>`, full history via `buildPrompt`). This provider-aware check — not a bare `messages.length` test — is what keeps a mid-session `/model` switch from another provider from `--resume`-ing a CLI session that was never created (which fails silently as an empty message). Resuming also skips re-sending the system prompt, since it's already in the CLI's session context.
+Two invariants here caused real outages; both are explained in
+docs/ARCHITECTURE.md:
 
-Two invariants here have each caused a real outage; both are explained at length in `docs/ARCHITECTURE.md`:
-
-- **`buildResumePrompt` anchors on the last _assistant_ message**, never the last user message. pi's tool loop leaves the only `user` entry at index 0, so anchoring there replays the entire transcript on every iteration. If a change makes the resume prompt grow with conversation length, it has regressed.
-- **A resume can miss.** Forks copy history into a new pi session id, so the heuristic says "resume" while the CLI cache is keyed to the old id. `streamViaCli` is a driver over `runOnce(forceFullReplay)`: a resume-miss aborts without touching pi's stream and retries once with a full replay under `--session-id`.
+- **`buildResumePrompt` anchors on the last _assistant_ message**, never the
+  last user message. If a change makes the resume prompt grow with
+  conversation length, it has regressed.
+- **A resume can miss.** `streamViaCli` is a driver over
+  `runOnce(forceFullReplay)`; the retry must not touch pi's stream.
 
 ### Episodes, not messages
 

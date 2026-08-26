@@ -49,12 +49,21 @@ export function isCustomToolName(piName: string): boolean {
 /**
  * Check if a Claude tool name maps to a pi-known tool.
  * Returns true for built-in tools (Read, Write, etc.) and custom MCP tools (mcp__custom-tools__*).
- * Returns false for internal Claude Code tools (ToolSearch, Task, Agent, etc.) that pi cannot execute.
- * Used by event bridge to filter out internal tool calls.
+ * Returns false for internal Claude Code tools (ToolSearch, Task, Agent, etc.).
  */
 export function isPiKnownClaudeTool(claudeName: string): boolean {
   if (claudeName.startsWith(CUSTOM_TOOLS_MCP_PREFIX)) return true;
   return claudeName.toLowerCase() in CLAUDE_TO_PI_NAME;
+}
+
+/**
+ * Handoff tools are the ONLY tools pi executes in observer mode: custom pi
+ * tools exposed through the schema-only MCP server. Built-ins run natively in
+ * the CLI. This is the gate for interrupt-at-message_stop and for emitting pi
+ * toolCall blocks — see docs/SPEC-observer-mode.md.
+ */
+export function isHandoffClaudeTool(claudeName: string): boolean {
+  return claudeName.startsWith(CUSTOM_TOOLS_MCP_PREFIX);
 }
 
 // Derived lookup maps

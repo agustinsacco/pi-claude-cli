@@ -319,7 +319,7 @@ describe("streamViaCli", () => {
     expect(proc.kill).toHaveBeenCalledWith("SIGKILL");
   });
 
-  it("kills subprocess when abort signal fires", async () => {
+  it("aborts with a clean interrupt, then a SIGKILL backstop", async () => {
     const model = mockModels[0] as any;
     const context = {
       messages: [{ role: "user", content: "Hello" }],
@@ -331,13 +331,21 @@ describe("streamViaCli", () => {
 
     const proc = (spawn as any).mock.results[0].value;
 
-    // Trigger abort -- this should call kill on the process
     controller.abort();
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(proc.kill).toHaveBeenCalled();
+    // First move is the CLI's own interrupt, so the session file stays
+    // truthful and resumable — never an immediate kill.
+    const written = (proc.stdin.write as any).mock.calls
+      .map((c: any) => String(c[0]))
+      .join("");
+    expect(written).toContain('"interrupt"');
+    expect(proc.kill).not.toHaveBeenCalled();
 
-    // End stdout to allow readline loop to finish and prevent hanging
+    // If the CLI never winds down, the 2s backstop force-kills.
+    await vi.advanceTimersByTimeAsync(2100);
+    expect(proc.kill).toHaveBeenCalledWith("SIGKILL");
+
     proc.stdout.end();
     await vi.advanceTimersByTimeAsync(100);
   });
@@ -594,7 +602,7 @@ describe("streamViaCli", () => {
   });
 
   describe("break-early logic", () => {
-    it("kills subprocess at message_stop when built-in tool_use seen and emits done event", async () => {
+    it("does NOT intervene when a built-in tool_use is seen — the CLI executes it natively", async () => {
       const model = mockModels[0] as any;
       const context = {
         messages: [{ role: "user", content: "Read a file" }],
@@ -664,19 +672,23 @@ describe("streamViaCli", () => {
       proc.stdout.end();
       await vi.advanceTimersByTimeAsync(100);
 
-      // Verify process was killed (break-early)
-      expect(proc.kill).toHaveBeenCalledWith("SIGKILL");
+      // Observer mode: no kill, no interrupt — the CLI runs the tool itself.
+      expect(proc.kill).not.toHaveBeenCalled();
+      const written = (proc.stdin.write as any).mock.calls
+        .map((c: any) => String(c[0]))
+        .join("");
+      expect(written).not.toContain('"interrupt"');
 
-      // Verify the stream received a done event (from event bridge handleMessageStop)
+      // And no pi toolCall events: built-ins are not pi's to execute.
       const mockStream = MockAssistantMessageEventStream.mock.instances[0];
-      const events = mockStream._events;
-      const eventTypes = events.map((e: any) => e.type);
+      const eventTypes = mockStream._events.map((e: any) => e.type);
+      expect(eventTypes).not.toContain("toolcall_start");
+      // done arrives after stdout ends with no result (stream closed), via
+      // the post-close push.
       expect(eventTypes).toContain("done");
-      expect(eventTypes).toContain("toolcall_start");
-      expect(eventTypes).toContain("toolcall_end");
     });
 
-    it("kills subprocess at message_stop when custom-tools MCP tool seen", async () => {
+    it("interrupts cleanly (never SIGKILL) at message_stop when a handoff tool is seen", async () => {
       const model = mockModels[0] as any;
       const context = {
         messages: [{ role: "user", content: "Search for something" }],
@@ -732,8 +744,39 @@ describe("streamViaCli", () => {
       proc.stdout.end();
       await vi.advanceTimersByTimeAsync(100);
 
-      // Verify process was killed (break-early for custom-tools MCP)
-      expect(proc.kill).toHaveBeenCalledWith("SIGKILL");
+      // A clean interrupt was asked for on stdin…
+      const written = (proc.stdin.write as any).mock.calls
+        .map((c: any) => String(c[0]))
+        .join("");
+      expect(written).toContain('"control_request"');
+      expect(written).toContain('"interrupt"');
+      // …and the process was NOT SIGKILLed mid-turn (a kill truncates the CLI
+      // transcript and poisons every later resume with synthetic filler).
+      expect(proc.kill).not.toHaveBeenCalled();
+
+      // The interrupted turn's result envelope is expected, not an error.
+      proc.stdout.write(
+        JSON.stringify({
+          type: "result",
+          subtype: "error_during_execution",
+          is_error: true,
+          usage: { input_tokens: 10, output_tokens: 5 },
+        }) + "\n",
+      );
+      proc.stdout.end();
+      await vi.advanceTimersByTimeAsync(600);
+
+      const mockStream = MockAssistantMessageEventStream.mock.instances[0];
+      const done = mockStream._events.find((e: any) => e.type === "done");
+      expect(done).toBeDefined();
+      expect(done.reason).toBe("toolUse");
+      const toolCalls = done.message.content.filter(
+        (c: any) => c.type === "toolCall",
+      );
+      expect(toolCalls).toHaveLength(1);
+      expect(toolCalls[0].name).toBe("search");
+      const text = done.message.content.map((c: any) => c.text ?? "").join(" ");
+      expect(text).not.toMatch(/error_during_execution/);
     });
 
     it("does NOT break-early when stream has no tool_use blocks", async () => {
@@ -1418,7 +1461,7 @@ describe("streamViaCli", () => {
   });
 
   describe("abort handler fix", () => {
-    it("abort signal sends SIGKILL not SIGTERM", async () => {
+    it("abort backstop sends SIGKILL not SIGTERM", async () => {
       const model = mockModels[0] as any;
       const context = {
         messages: [{ role: "user", content: "Hello" }],
@@ -1430,13 +1473,11 @@ describe("streamViaCli", () => {
 
       const proc = (spawn as any).mock.results[0].value;
 
-      // Trigger abort
       controller.abort();
-      await vi.advanceTimersByTimeAsync(0);
+      // Let the interrupt grace elapse so the backstop fires.
+      await vi.advanceTimersByTimeAsync(2100);
 
-      // Verify SIGKILL was used (not SIGTERM)
       expect(proc.kill).toHaveBeenCalledWith("SIGKILL");
-      // Ensure SIGTERM was NOT used
       const sigTermCalls = proc.kill.mock.calls.filter(
         (call: any[]) => call[0] === "SIGTERM",
       );
@@ -1449,7 +1490,7 @@ describe("streamViaCli", () => {
   });
 
   describe("abort signal already aborted", () => {
-    it("kills subprocess immediately when signal is already aborted", async () => {
+    it("winds down a pre-aborted signal via interrupt + backstop", async () => {
       const model = mockModels[0] as any;
       const context = {
         messages: [{ role: "user", content: "Hello" }],
@@ -1458,7 +1499,7 @@ describe("streamViaCli", () => {
       controller.abort(); // Abort BEFORE calling streamViaCli
 
       streamViaCli(model, context, { signal: controller.signal });
-      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(2100);
 
       const proc = (spawn as any).mock.results[0].value;
       expect(proc.kill).toHaveBeenCalledWith("SIGKILL");
@@ -1594,7 +1635,7 @@ describe("streamViaCli", () => {
       expect(doneEvent.message.stopReason).toBe("stop");
     });
 
-    it("keeps toolUse stopReason when pi-known tool calls are present", async () => {
+    it("keeps toolUse stopReason when a handoff tool call is present", async () => {
       const model = mockModels[0] as any;
       const context = {
         messages: [{ role: "user", content: "Read a file" }],
@@ -1605,7 +1646,7 @@ describe("streamViaCli", () => {
 
       const proc = (spawn as any).mock.results[0].value;
 
-      // Stream a sequence where Claude calls a built-in tool (Read)
+      // Stream a sequence where Claude calls a HANDOFF tool
       const lines = [
         JSON.stringify({
           type: "stream_event",
@@ -1621,8 +1662,8 @@ describe("streamViaCli", () => {
             index: 0,
             content_block: {
               type: "tool_use",
-              id: "tool_read",
-              name: "Read",
+              id: "tool_h",
+              name: "mcp__custom-tools__search",
               input: "",
             },
           },
@@ -1634,7 +1675,7 @@ describe("streamViaCli", () => {
             index: 0,
             delta: {
               type: "input_json_delta",
-              partial_json: '{"file_path":"/foo.ts"}',
+              partial_json: '{"query":"x"}',
             },
           },
         }),
@@ -1658,7 +1699,17 @@ describe("streamViaCli", () => {
       for (const line of lines) {
         proc.stdout.write(line + "\n");
       }
-      // Break-early kills and closes readline
+      await vi.advanceTimersByTimeAsync(0);
+      // The handoff interrupt ends the turn with an expected
+      // error_during_execution result envelope.
+      proc.stdout.write(
+        JSON.stringify({
+          type: "result",
+          subtype: "error_during_execution",
+          is_error: true,
+          usage: { input_tokens: 10, output_tokens: 5 },
+        }) + "\n",
+      );
       await vi.advanceTimersByTimeAsync(100);
 
       const mockStream = MockAssistantMessageEventStream.mock.instances[0];
@@ -1792,169 +1843,182 @@ describe("streamViaCli", () => {
     });
   });
 
-  describe("session resume via options.sessionId", () => {
-    it("passes --resume when sessionId option is provided on subsequent turn", async () => {
-      const model = mockModels[0] as any;
+  describe("session mapping: one CLI session per pi session", () => {
+    // Observer mode resumes the CLI session recorded in the sidecar map
+    // (PI_CLAUDE_CLI_STATE_DIR), and reimports on anything suspicious.
+    const os = require("node:os");
+    const fsx = require("node:fs");
+    const pathx = require("node:path");
+    let stateDir: string;
+
+    beforeEach(() => {
+      stateDir = fsx.mkdtempSync(pathx.join(os.tmpdir(), "pcc-state-"));
+      process.env.PI_CLAUDE_CLI_STATE_DIR = stateDir;
+    });
+
+    afterEach(() => {
+      delete process.env.PI_CLAUDE_CLI_STATE_DIR;
+      try {
+        fsx.rmSync(stateDir, { recursive: true, force: true });
+      } catch {
+        /* ignore */
+      }
+    });
+
+    const writeMap = (map: Record<string, string>) =>
+      fsx.writeFileSync(
+        pathx.join(stateDir, "session-map.json"),
+        JSON.stringify(map),
+      );
+    const readMapFile = (): Record<string, string> =>
+      JSON.parse(
+        fsx.readFileSync(pathx.join(stateDir, "session-map.json"), "utf-8"),
+      );
+
+    const drain = async () => {
+      const proc = (spawn as any).mock.results[0].value;
+      proc.stdout.end();
+      await vi.advanceTimersByTimeAsync(100);
+    };
+
+    const ourAssistant = {
+      role: "assistant",
+      content: "Hi",
+      provider: "pi-claude-cli",
+      api: "pi-claude-cli",
+    };
+
+    it("resumes the mapped CLI session with a delta prompt and no system prompt", async () => {
+      writeMap({ "pi-sess-1": "cli-sess-9" });
+      const context = {
+        systemPrompt: "SYS",
+        messages: [
+          { role: "user", content: "FIRST" },
+          ourAssistant,
+          { role: "user", content: "SECOND" },
+        ],
+      };
+
+      streamViaCli(mockModels[0] as any, context, {
+        sessionId: "pi-sess-1",
+      } as any);
+      await vi.advanceTimersByTimeAsync(0);
+
+      const args = (spawn as any).mock.calls[0][1] as string[];
+      expect(args).toContain("--resume");
+      expect(args[args.indexOf("--resume") + 1]).toBe("cli-sess-9");
+      expect(args).not.toContain("--session-id");
+      expect(args).not.toContain("--append-system-prompt");
+      expect(args).not.toContain("--system-prompt");
+
+      const proc = (spawn as any).mock.results[0].value;
+      const sent = JSON.parse(
+        (proc.stdin.write as any).mock.calls[0][0] as string,
+      ).message.content as string;
+      // Delta only: the CLI session already holds FIRST and the reply.
+      expect(sent).toContain("SECOND");
+      expect(sent).not.toContain("FIRST");
+      await drain();
+    });
+
+    it("creates a fresh CLI session with a provider-minted id on the first turn", async () => {
+      const context = { messages: [{ role: "user", content: "Hello" }] };
+
+      streamViaCli(mockModels[0] as any, context, {
+        sessionId: "pi-sess-2",
+      } as any);
+      await vi.advanceTimersByTimeAsync(0);
+
+      const args = (spawn as any).mock.calls[0][1] as string[];
+      expect(args).not.toContain("--resume");
+      expect(args).toContain("--session-id");
+      const cliId = args[args.indexOf("--session-id") + 1];
+      // Never pi's id: forks reuse pi ids, and the CLI refuses a seen id.
+      expect(cliId).not.toBe("pi-sess-2");
+      expect(cliId).toMatch(/^[0-9a-f-]{36}$/);
+      // The mapping is recorded for the next turn to resume.
+      expect(readMapFile()["pi-sess-2"]).toBe(cliId);
+      await drain();
+    });
+
+    it("reimports when a foreign-provider turn followed our last one (stale CLI session)", async () => {
+      writeMap({ "pi-sess-3": "cli-sess-old" });
+      const context = {
+        messages: [
+          { role: "user", content: "FIRST" },
+          ourAssistant,
+          { role: "user", content: "SECOND" },
+          {
+            role: "assistant",
+            content: "from GLM",
+            provider: "amazon-bedrock",
+          },
+          { role: "user", content: "THIRD" },
+        ],
+      };
+
+      streamViaCli(mockModels[0] as any, context, {
+        sessionId: "pi-sess-3",
+      } as any);
+      await vi.advanceTimersByTimeAsync(0);
+
+      const args = (spawn as any).mock.calls[0][1] as string[];
+      expect(args).not.toContain("--resume");
+      expect(args).toContain("--session-id");
+
+      // Full history import, not a delta.
+      const proc = (spawn as any).mock.results[0].value;
+      const sent = JSON.parse(
+        (proc.stdin.write as any).mock.calls[0][0] as string,
+      ).message.content as string;
+      expect(sent).toContain("FIRST");
+      expect(sent).toContain("THIRD");
+      await drain();
+    });
+
+    it("creates a fresh session when no sessionId option is given", async () => {
       const context = {
         messages: [
           { role: "user", content: "Hello" },
-          {
-            role: "assistant",
-            content: "Hi",
-            provider: "pi-claude-cli",
-            api: "pi-claude-cli",
-          },
+          ourAssistant,
           { role: "user", content: "Follow-up" },
         ],
       };
 
-      streamViaCli(model, context, { sessionId: "sess-abc-123" } as any);
-      await vi.advanceTimersByTimeAsync(0);
-
-      const args = (spawn as any).mock.calls[0][1] as string[];
-      expect(args).toContain("--resume");
-      const idx = args.indexOf("--resume");
-      expect(args[idx + 1]).toBe("sess-abc-123");
-
-      // Clean up
-      const proc = (spawn as any).mock.results[0].value;
-      proc.stdout.end();
-      await vi.advanceTimersByTimeAsync(100);
-    });
-
-    it("passes --session-id on first turn when sessionId provided", async () => {
-      const model = mockModels[0] as any;
-      const context = {
-        messages: [{ role: "user", content: "Hello" }],
-      };
-
-      streamViaCli(model, context, { sessionId: "sess-new" } as any);
+      streamViaCli(mockModels[0] as any, context);
       await vi.advanceTimersByTimeAsync(0);
 
       const args = (spawn as any).mock.calls[0][1] as string[];
       expect(args).not.toContain("--resume");
       expect(args).toContain("--session-id");
-      const idx = args.indexOf("--session-id");
-      expect(args[idx + 1]).toBe("sess-new");
-
-      // Clean up
-      const proc = (spawn as any).mock.results[0].value;
-      proc.stdout.end();
-      await vi.advanceTimersByTimeAsync(100);
+      await drain();
     });
 
-    it("does not pass --resume or --session-id when no sessionId option", async () => {
-      const model = mockModels[0] as any;
-      const context = {
-        messages: [{ role: "user", content: "Hello" }],
-      };
-
-      streamViaCli(model, context);
-      await vi.advanceTimersByTimeAsync(0);
-
-      const args = (spawn as any).mock.calls[0][1] as string[];
-      expect(args).not.toContain("--resume");
-      expect(args).not.toContain("--session-id");
-
-      // Clean up
-      const proc = (spawn as any).mock.results[0].value;
-      proc.stdout.end();
-      await vi.advanceTimersByTimeAsync(100);
-    });
-
-    it("uses buildResumePrompt when sessionId is provided (sends only new content)", async () => {
-      const model = mockModels[0] as any;
+    it("clears the mapping when a turn fails, so the next turn reimports", async () => {
+      writeMap({ "pi-sess-4": "cli-sess-4" });
       const context = {
         messages: [
-          { role: "user", content: "first message" },
-          {
-            role: "assistant",
-            content: "response",
-            provider: "pi-claude-cli",
-            api: "pi-claude-cli",
-          },
-          { role: "user", content: "follow-up" },
+          { role: "user", content: "FIRST" },
+          ourAssistant,
+          { role: "user", content: "SECOND" },
         ],
       };
 
-      streamViaCli(model, context, { sessionId: "sess-resume" } as any);
+      streamViaCli(mockModels[0] as any, context, {
+        sessionId: "pi-sess-4",
+      } as any);
       await vi.advanceTimersByTimeAsync(0);
 
       const proc = (spawn as any).mock.results[0].value;
-      const written = proc.stdin.write.mock.calls[0][0] as string;
-      const parsed = JSON.parse(written.trim());
-      // Should only contain the latest user message, not full history
-      expect(parsed.message.content).toBe("follow-up");
-
-      // Clean up
-      proc.stdout.end();
-      await vi.advanceTimersByTimeAsync(100);
-    });
-
-    it("does not pass system prompt when resuming", async () => {
-      const model = mockModels[0] as any;
-      const context = {
-        messages: [
-          { role: "user", content: "Hello" },
-          {
-            role: "assistant",
-            content: "Hi",
-            provider: "pi-claude-cli",
-            api: "pi-claude-cli",
-          },
-          { role: "user", content: "follow-up" },
-        ],
-        systemPrompt: "Be helpful",
-      };
-
-      streamViaCli(model, context, { sessionId: "sess-resume" } as any);
+      proc.stdout.write(
+        JSON.stringify({ type: "result", subtype: "error", error: "boom" }) +
+          "\n",
+      );
       await vi.advanceTimersByTimeAsync(0);
-
-      const args = (spawn as any).mock.calls[0][1] as string[];
-      expect(args).toContain("--resume");
-      expect(args).not.toContain("--append-system-prompt");
-
-      // Clean up
-      const proc = (spawn as any).mock.results[0].value;
       proc.stdout.end();
       await vi.advanceTimersByTimeAsync(100);
-    });
 
-    it("uses --session-id (not --resume) when prior assistant turns are from a different provider", async () => {
-      // Regression test: switching to pi-claude-cli mid-session from another
-      // provider must not --resume a CLI session that was never created,
-      // because `claude --resume <unknown>` fails silently and pi receives
-      // an empty assistant message.
-      const model = mockModels[0] as any;
-      const context = {
-        messages: [
-          { role: "user", content: "earlier prompt" },
-          {
-            role: "assistant",
-            content: "earlier reply",
-            provider: "anthropic",
-            api: "anthropic",
-          },
-          { role: "user", content: "first pi-claude-cli prompt" },
-        ],
-        systemPrompt: "Be helpful",
-      };
-
-      streamViaCli(model, context, { sessionId: "sess-cross" } as any);
-      await vi.advanceTimersByTimeAsync(0);
-
-      const args = (spawn as any).mock.calls[0][1] as string[];
-      expect(args).not.toContain("--resume");
-      expect(args).toContain("--session-id");
-      const idx = args.indexOf("--session-id");
-      expect(args[idx + 1]).toBe("sess-cross");
-      // Fresh session must send the system prompt and full history.
-      expect(args).toContain("--append-system-prompt");
-
-      // Clean up
-      const proc = (spawn as any).mock.results[0].value;
-      proc.stdout.end();
-      await vi.advanceTimersByTimeAsync(100);
+      expect(readMapFile()["pi-sess-4"]).toBeUndefined();
     });
   });
 

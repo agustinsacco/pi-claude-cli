@@ -32,12 +32,15 @@ effort range (through `max`) is selectable.
 ```
 pi agent loop
   └─ streamSimple(model, context, options)
-       ├─ prompt-builder  → flattened history (first turn) or delta (resume)
+       ├─ session-map     → resume the pi session's CLI session, or import
+       ├─ prompt-builder  → delta (resume) or flattened history (import)
        ├─ process-manager → spawn claude -p --output-format stream-json …
        ├─ stream-parser   → NDJSON lines (never throws)
-       ├─ event-bridge    → pi stream events (text/thinking/toolcall deltas)
+       ├─ event-bridge    → pi stream events; CLI-executed tools as markers,
+       │                    HANDOFF (custom pi) tools as toolCall blocks
        ├─ control-handler → answers can_use_tool permission requests
-       └─ break-early     → SIGKILL before the CLI executes pi-owned tools
+       └─ handoff         → clean `interrupt` at message_stop so pi executes
+                            custom tools; the CLI is never SIGKILLed mid-turn
 ```
 
 ### Prompt in
@@ -185,30 +188,43 @@ natural starting points if a front-end ever wants richer Claude-Code-side UX:
 
 The belt is `control-handler.ts`: custom-tools requests get
 `{behavior:"deny"}` (so pi runs them), everything else `allow`. The
-suspenders are **break-early** in `provider.ts`: at the first top-level
-`message_stop` after any pi-executable `tool_use`, the subprocess is
-SIGKILLed before Claude Code's executor can act. A `broken` flag is set
-_before_ closing the reader so buffered lines cannot slip through.
+suspenders are the **handoff interrupt** in `provider.ts`: at the first
+top-level `message_stop` after a HANDOFF `tool_use`
+(`mcp__custom-tools__*` only), the provider sends the CLI's own `interrupt`
+control request and freezes the stream until the result envelope arrives.
+Built-in tools never trigger either mechanism — the CLI executes them
+natively and pi renders the markers.
 
-## Session model: two ledgers
+**Never SIGKILL a healthy turn.** A kill truncates the CLI's session file
+before the assistant turn is written; every later `--resume` then splices a
+synthetic `No response requested.` assistant turn into the replayed
+transcript, and the model eventually imitates it — observed in production
+as sessions silently dying mid-task. SIGKILL remains only as the abort
+backstop (2s after an interrupt) and the post-result reaper.
 
-pi's session JSONL is the **only** authoritative record. The CLI session is
-a disposable cache keyed by pi's session id.
+## Session model: one CLI session per pi session
 
-- First provider turn: `--session-id <pi id>` creates the CLI session.
-- Later turns: `--resume <pi id>` plus a **delta** prompt (only what follows
-  the last assistant turn) — this is also what keeps Anthropic's prompt
-  cache warm.
-- Resume is only attempted when the conversation already contains an
-  assistant turn from this provider (`hasPriorCliTurn`).
-- **Resume miss** (forks copy history into a _new_ pi session id, so the
-  heuristic says resume while the CLI cache is keyed to the old id): the
-  attempt aborts without touching pi's stream and the driver retries once
-  with a full-history replay under `--session-id`, which re-registers the
-  cache. Subsequent turns resume normally.
+pi's session JSONL is the **only** authoritative record; the CLI session is
+the model's working memory. The sidecar map
+`~/.pi/agent/pi-claude-cli/session-map.json` (`PI_CLAUDE_CLI_STATE_DIR`
+overrides; `src/session-map.ts`) links pi session id → CLI session id.
 
-Switching models mid-session, forking, or losing the CLI cache therefore
-costs one full replay — never a lost turn.
+- **Resume:** mapping present and not stale → `--resume <cliId>` with a
+  **delta** prompt (only what follows the last assistant turn), no system
+  prompt. This is what makes token use native: measured 60 cache-write
+  tokens on a follow-up turn.
+- **Create/import:** no mapping, stale, resume miss, or failed prior turn →
+  fresh provider-minted UUID under `--session-id`, full flattened history,
+  system prompt attached, mapping recorded. Never pi's id — the CLI refuses
+  an id it has already seen, and forks copy pi ids.
+- **Stale** (`cliSessionIsStale`): an assistant turn from another provider
+  follows or replaces our last one, i.e. the CLI never saw that exchange.
+- **Resume miss** ("No conversation found with session ID"): clear the
+  mapping; the driver retries once through the import path without touching
+  pi's stream.
+
+Forks, model switches, copied machines and lost sidecars all collapse into
+one recovery path: a single full-history import. Never a lost turn.
 
 ### The delta anchor is load-bearing (0.4.6)
 
@@ -349,6 +365,9 @@ fires, and the turn looks truncated. This was the root cause behind every
 - `npm run test:e2e` — full pipeline through a real `pi` binary against a
   deterministic CLI stub (`tests/e2e/claude-stub.cjs`); no credentials.
 - CI runs both on three OSes plus a weekly canary against `pi@latest`.
-- Live smokes that cannot be automated (they spend plan quota) are listed in
-  the issue threads: fresh turn, `-c` resume, `--fork`, a CLI-side tool
-  turn, and a break-early write round-trip.
+- `scripts/e2e-live.sh` (= `PI_CLAUDE_CLI_LIVE=1 vitest run
+tests/live-observer.test.ts`) — live observer-mode suite against the real
+  CLI; spends plan quota, so it is not in CI. Covers: a native multi-tool
+  turn, a cheap resume of the same CLI session (asserts cacheRead > 5k and
+  cacheWrite < 2k), the custom-tool handoff round-trip, a PreToolUse guard
+  hook blocking an out-of-workspace read, and abort/steer + resume.

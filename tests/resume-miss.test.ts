@@ -121,13 +121,31 @@ function textEpisode(text: string): string[] {
 }
 
 describe("resume-miss fallback (issue #2)", () => {
+  const os = require("node:os");
+  const fsx = require("node:fs");
+  const pathx = require("node:path");
+  let stateDir: string;
+
   beforeEach(() => {
     vi.useFakeTimers();
     vi.clearAllMocks();
+    stateDir = fsx.mkdtempSync(pathx.join(os.tmpdir(), "pcc-miss-"));
+    process.env.PI_CLAUDE_CLI_STATE_DIR = stateDir;
+    // A recorded mapping whose CLI session no longer exists on disk.
+    fsx.writeFileSync(
+      pathx.join(stateDir, "session-map.json"),
+      JSON.stringify({ "forked-session-id": "cli-gone" }),
+    );
   });
 
   afterEach(() => {
     vi.useRealTimers();
+    delete process.env.PI_CLAUDE_CLI_STATE_DIR;
+    try {
+      fsx.rmSync(stateDir, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
   });
 
   it("retries once with a full replay when --resume misses, and succeeds", async () => {
@@ -142,12 +160,15 @@ describe("resume-miss fallback (issue #2)", () => {
     proc1.stdout.end();
     await vi.advanceTimersByTimeAsync(0);
 
-    // Attempt 2 replays full history under the current session id.
+    // Attempt 2 imports pi's full history into a FRESH CLI session.
     expect((spawn as any).mock.calls).toHaveLength(2);
     const args2 = (spawn as any).mock.calls[1][1];
     expect(args2).not.toContain("--resume");
     expect(args2).toContain("--session-id");
-    expect(args2).toContain("forked-session-id");
+    // Fresh provider-minted id, never the pi session id.
+    const freshId = args2[args2.indexOf("--session-id") + 1];
+    expect(freshId).not.toBe("forked-session-id");
+    expect(freshId).toMatch(/^[0-9a-f-]{36}$/);
 
     const proc2 = (spawn as any).mock.results[1].value;
     for (const line of textEpisode("FORKED-TURN")) {

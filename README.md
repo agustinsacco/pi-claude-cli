@@ -12,7 +12,7 @@ A [pi](https://github.com/earendil-works/pi) extension that routes LLM calls thr
 
 ## How it works
 
-The extension registers as a custom pi provider exposing all Claude models. Each request spawns a `claude -p` subprocess using the stream-json wire protocol, with `--resume` on follow-up turns to reuse the CLI's session state instead of replaying full history. Claude proposes tool calls, pi executes them natively. Custom pi tools are exposed to Claude via a schema-only MCP server.
+The extension registers as a custom pi provider exposing all Claude models. It runs in **observer mode**: the Claude Code CLI is a first-class agent that owns its loop, its tools and its session — pi is the system of record and observes the stream. One CLI session per pi session, resumed with `--resume` on every follow-up turn, so token use matches using the CLI directly. Built-in tools (Read, Bash, …) execute natively inside the CLI and surface to pi as `[Claude Code · Name]` activity markers. Custom pi tools are advertised via a schema-only MCP server and **handed off**: the provider interrupts the turn cleanly, pi executes the tool (all pi hooks fire), and the next turn resumes with the result.
 
 ## Requirements
 
@@ -44,7 +44,8 @@ Requires the `claude` binary on your login-shell PATH (`npm install -g @anthropi
 - Maps tool names and arguments bidirectionally between Claude and pi
 - Exposes custom pi tools to Claude via MCP (schema-only, no execution)
 - Break-early pattern prevents Claude CLI from auto-executing tools
-- Session resume via `--resume` eliminates history replay on follow-up turns
+- One CLI session per pi session (sidecar-mapped), resumed on every follow-up turn — native caching, no history replay
+- Native tool execution: the CLI runs its own tools; guards are injected as Claude Code PreToolUse hooks via `PI_CLAUDE_CLI_SETTINGS`
 - Reports account rate-limit state (window, reset, overage) to the front-end
   on the `claude-rate-limit` status key — never mixed into turn content
 - Configurable thinking effort across the full ladder (low to max) for all models, with elevated mapping for Opus
