@@ -95,6 +95,14 @@ export function spawnClaude(
     );
   }
 
+  // Host-supplied Claude Code settings (hooks, permissions). This is how a
+  // host injects PreToolUse guards — e.g. pidex's worktree-paths guard —
+  // without pi intercepting the CLI's native tool execution.
+  const settingsPath = process.env.PI_CLAUDE_CLI_SETTINGS;
+  if (settingsPath) {
+    args.push("--settings", settingsPath);
+  }
+
   if (options?.effort) {
     args.push("--effort", options.effort);
   }
@@ -146,6 +154,29 @@ export function writeUserMessage(
     },
   };
   proc.stdin!.write(JSON.stringify(message) + "\n");
+}
+
+/**
+ * Ask the CLI to end the current turn cleanly — the same interrupt a human
+ * Esc produces. Unlike SIGKILL this lets the CLI persist the turn, so the
+ * session stays resumable without transcript corruption. The turn then ends
+ * with a `result` of subtype `error_during_execution`, which callers must
+ * treat as expected.
+ */
+export function sendInterrupt(proc: ChildProcess): void {
+  // `exitCode != null` (loose): undefined means "has not exited" on mocks and
+  // some stream wrappers, and must count as alive.
+  if (proc.killed || proc.exitCode != null || !proc.stdin) return;
+  const request = {
+    type: "control_request",
+    request_id: `int-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`,
+    request: { subtype: "interrupt" },
+  };
+  try {
+    proc.stdin.write(JSON.stringify(request) + "\n");
+  } catch {
+    // stdin already closed — the force-kill fallback will handle it.
+  }
 }
 
 /**

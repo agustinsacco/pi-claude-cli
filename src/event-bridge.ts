@@ -17,7 +17,7 @@ import type {
 import {
   mapClaudeToolNameToPi,
   translateClaudeArgsToPi,
-  isPiKnownClaudeTool,
+  isHandoffClaudeTool,
 } from "./tool-mapping.js";
 
 /**
@@ -267,9 +267,11 @@ export function createEventBridge(
     } else if (blockType === "tool_use") {
       const claudeName = event.content_block!.name!;
 
-      // Skip internal Claude Code tools (ToolSearch, Task, Agent, etc.)
-      // that pi cannot execute — only emit pi-known tools
-      if (!isPiKnownClaudeTool(claudeName)) {
+      // Observer mode: the CLI executes its own tools (built-ins, WebSearch,
+      // user MCP, Task). Those surface as marker text via the envelope path,
+      // never as pi toolCall blocks. Only HANDOFF tools — custom pi tools
+      // behind the schema-only MCP server — become toolCalls for pi's loop.
+      if (!isHandoffClaudeTool(claudeName)) {
         return;
       }
 
@@ -501,9 +503,10 @@ export function createEventBridge(
     if (envelope.parent_tool_use_id) return;
     for (const block of envelope.message?.content ?? []) {
       if (block.type !== "tool_use" || !block.name || !block.id) continue;
-      // Pi-known tools already streamed through the SSE path as real pi
-      // tool calls — markers are only for tools the CLI executes itself.
-      if (isPiKnownClaudeTool(block.name)) continue;
+      // Handoff tools already streamed through the SSE path as real pi
+      // tool calls — markers are for everything the CLI executes itself,
+      // which in observer mode includes the built-in file tools.
+      if (isHandoffClaudeTool(block.name)) continue;
       if (markedToolIds.has(block.id)) continue;
       markedToolIds.add(block.id);
 

@@ -30,6 +30,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   spawnClaude,
+  sendInterrupt,
   writeUserMessage,
   cleanupProcess,
   captureStderr,
@@ -617,6 +618,71 @@ describe("resume session flag", () => {
 
     expect(args).toContain("--resume");
     expect(args).toContain("--mcp-config");
+  });
+});
+
+describe("PI_CLAUDE_CLI_SETTINGS passthrough", () => {
+  const original = process.env.PI_CLAUDE_CLI_SETTINGS;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    if (original === undefined) delete process.env.PI_CLAUDE_CLI_SETTINGS;
+    else process.env.PI_CLAUDE_CLI_SETTINGS = original;
+    vi.clearAllMocks();
+  });
+
+  it("passes --settings when the env var is set (hook injection point)", () => {
+    process.env.PI_CLAUDE_CLI_SETTINGS = "/etc/pidex/claude-settings.json";
+    spawnClaude("claude-haiku-4-5");
+    const args = (spawn as any).mock.calls[0][1] as string[];
+    expect(args).toContain("--settings");
+    expect(args[args.indexOf("--settings") + 1]).toBe(
+      "/etc/pidex/claude-settings.json",
+    );
+  });
+
+  it("omits --settings when unset", () => {
+    delete process.env.PI_CLAUDE_CLI_SETTINGS;
+    spawnClaude("claude-haiku-4-5");
+    const args = (spawn as any).mock.calls[0][1] as string[];
+    expect(args).not.toContain("--settings");
+  });
+});
+
+describe("sendInterrupt", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("writes an interrupt control_request to stdin", () => {
+    const proc = spawnClaude("claude-haiku-4-5");
+    sendInterrupt(proc);
+    const written = (proc.stdin!.write as any).mock.calls
+      .map((c: any) => String(c[0]))
+      .join("");
+    const line = written.trim().split("\n").pop()!;
+    const msg = JSON.parse(line);
+    expect(msg.type).toBe("control_request");
+    expect(msg.request.subtype).toBe("interrupt");
+    expect(msg.request_id).toBeTruthy();
+  });
+
+  it("no-ops on a dead process", () => {
+    const proc = spawnClaude("claude-haiku-4-5");
+    (proc as any).killed = true;
+    sendInterrupt(proc);
+    expect((proc.stdin!.write as any).mock.calls).toHaveLength(0);
+  });
+
+  it("mints distinct request ids", () => {
+    const proc = spawnClaude("claude-haiku-4-5");
+    sendInterrupt(proc);
+    sendInterrupt(proc);
+    const ids = (proc.stdin!.write as any).mock.calls.map(
+      (c: any) => JSON.parse(String(c[0])).request_id,
+    );
+    expect(ids[0]).not.toBe(ids[1]);
   });
 });
 

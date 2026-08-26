@@ -146,6 +146,104 @@ describe("multi-cycle episodes (issue #3)", () => {
     expect(message.stopReason).toBe("stop");
   });
 
+  it("surfaces natively-executed built-in tools as markers, never as pi toolCalls", async () => {
+    // Observer mode: the CLI runs Read/Bash/etc. itself mid-episode. pi sees
+    // activity markers; a built-in must never become a pi toolCall and must
+    // never end the episode early.
+    const sse = (event: any) => JSON.stringify({ type: "stream_event", event });
+    streamViaCli(model, { messages: [{ role: "user", content: "go" }] });
+    await vi.advanceTimersByTimeAsync(0);
+    const proc = (spawn as any).mock.results[0].value;
+
+    const lines = [
+      // Cycle 1: the model calls Read; the CLI executes it natively.
+      sse({ type: "message_start", message: { usage: { input_tokens: 5 } } }),
+      sse({
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "tool_use", id: "t1", name: "Read" },
+      }),
+      sse({ type: "content_block_stop", index: 0 }),
+      sse({
+        type: "message_delta",
+        delta: { stop_reason: "tool_use" },
+        usage: { output_tokens: 2 },
+      }),
+      sse({ type: "message_stop" }),
+      // Envelope for the completed Read block → marker.
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          content: [
+            {
+              type: "tool_use",
+              id: "t1",
+              name: "Read",
+              input: { file_path: "/a.txt" },
+            },
+          ],
+        },
+      }),
+      // CLI feeds the tool result back internally.
+      JSON.stringify({
+        type: "user",
+        message: {
+          content: [{ type: "tool_result", tool_use_id: "t1", content: "hi" }],
+        },
+      }),
+      // Cycle 2: the final answer.
+      sse({ type: "message_start", message: { usage: { input_tokens: 9 } } }),
+      sse({
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "text", text: "" },
+      }),
+      sse({
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text: "the file says hi" },
+      }),
+      sse({ type: "content_block_stop", index: 0 }),
+      sse({
+        type: "message_delta",
+        delta: { stop_reason: "end_turn" },
+        usage: { output_tokens: 4 },
+      }),
+      sse({ type: "message_stop" }),
+      JSON.stringify({ type: "result", subtype: "success" }),
+    ];
+    for (const line of lines) {
+      proc.stdout.write(line + "\n");
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    proc.stdout.end();
+    await vi.advanceTimersByTimeAsync(600);
+
+    // The turn ran to completion: no interrupt asked for, no kill before the
+    // 500ms post-result reap.
+    const written = (proc.stdin.write as any).mock.calls
+      .map((c: any) => String(c[0]))
+      .join("");
+    expect(written).not.toContain('"interrupt"');
+
+    const mockStream = MockAssistantMessageEventStream.mock.instances[0];
+    const done = mockStream._events.find((e: any) => e.type === "done");
+    expect(done).toBeDefined();
+    expect(done.message.stopReason).toBe("stop");
+    expect(done.message.content.some((c: any) => c.type === "toolCall")).toBe(
+      false,
+    );
+    const texts = done.message.content
+      .filter((c: any) => c.type === "text")
+      .map((c: any) => c.text);
+    expect(texts.some((t: string) => t.startsWith("[Claude Code · Read"))).toBe(
+      true,
+    );
+    expect(texts.some((t: string) => t.includes("the file says hi"))).toBe(
+      true,
+    );
+  });
+
   it("reports the episode's cumulative usage, not the last cycle's", async () => {
     const { message } = await runEpisode();
     // Authoritative totals from the result envelope (equal to per-cycle sums).

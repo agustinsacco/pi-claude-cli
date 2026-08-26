@@ -343,13 +343,20 @@ describe("createEventBridge", () => {
     });
   });
 
-  describe("tool_use content block streaming", () => {
+  // Observer mode: only HANDOFF tools (custom pi tools behind the MCP
+  // schema server) stream as pi toolCalls. Built-ins run natively in the CLI
+  // and surface as markers — see the marker and filtering suites.
+  describe("tool_use content block streaming (handoff tools)", () => {
     it("pushes toolcall_start with mapped pi name on content_block_start", () => {
       const bridge = createBridgeWithStart();
       bridge.handleEvent({
         type: "content_block_start",
         index: 0,
-        content_block: { type: "tool_use", id: "toolu_01ABC", name: "Read" },
+        content_block: {
+          type: "tool_use",
+          id: "toolu_01ABC",
+          name: "mcp__custom-tools__lookup",
+        },
       });
 
       expect(stream.push).toHaveBeenCalledTimes(1);
@@ -357,7 +364,7 @@ describe("createEventBridge", () => {
       expect(event.type).toBe("toolcall_start");
       expect(event.contentIndex).toBe(0);
       // Tool name should be mapped from Claude "Read" to pi "read"
-      expect(event.partial.content[0].name).toBe("read");
+      expect(event.partial.content[0].name).toBe("lookup");
     });
 
     it("pushes toolcall_delta with raw JSON fragment on input_json_delta", () => {
@@ -365,7 +372,11 @@ describe("createEventBridge", () => {
       bridge.handleEvent({
         type: "content_block_start",
         index: 0,
-        content_block: { type: "tool_use", id: "toolu_01ABC", name: "Read" },
+        content_block: {
+          type: "tool_use",
+          id: "toolu_01ABC",
+          name: "mcp__custom-tools__lookup",
+        },
       });
       stream.push.mockClear();
       stream.events.length = 0;
@@ -388,18 +399,22 @@ describe("createEventBridge", () => {
       bridge.handleEvent({
         type: "content_block_start",
         index: 0,
-        content_block: { type: "tool_use", id: "toolu_01ABC", name: "Read" },
+        content_block: {
+          type: "tool_use",
+          id: "toolu_01ABC",
+          name: "mcp__custom-tools__lookup",
+        },
       });
 
       bridge.handleEvent({
         type: "content_block_delta",
         index: 0,
-        delta: { type: "input_json_delta", partial_json: '{"file_' },
+        delta: { type: "input_json_delta", partial_json: '{"que' },
       });
       bridge.handleEvent({
         type: "content_block_delta",
         index: 0,
-        delta: { type: "input_json_delta", partial_json: 'path": "/foo.ts"}' },
+        delta: { type: "input_json_delta", partial_json: 'ry": "/foo.ts"}' },
       });
 
       // After full JSON is accumulated, the output content should have parsed args
@@ -407,7 +422,7 @@ describe("createEventBridge", () => {
       const toolCall = output.content[0] as any;
       expect(toolCall.type).toBe("toolCall");
       // Arguments should be updated as JSON becomes parseable
-      expect(toolCall.arguments).toEqual({ file_path: "/foo.ts" });
+      expect(toolCall.arguments).toEqual({ query: "/foo.ts" });
     });
 
     it("pushes toolcall_end with fully parsed and argument-mapped ToolCall on block_stop", () => {
@@ -415,14 +430,18 @@ describe("createEventBridge", () => {
       bridge.handleEvent({
         type: "content_block_start",
         index: 0,
-        content_block: { type: "tool_use", id: "toolu_01ABC", name: "Read" },
+        content_block: {
+          type: "tool_use",
+          id: "toolu_01ABC",
+          name: "mcp__custom-tools__lookup",
+        },
       });
       bridge.handleEvent({
         type: "content_block_delta",
         index: 0,
         delta: {
           type: "input_json_delta",
-          partial_json: '{"file_path": "/foo.ts"}',
+          partial_json: '{"query": "/foo.ts"}',
         },
       });
       stream.push.mockClear();
@@ -439,9 +458,9 @@ describe("createEventBridge", () => {
       expect(event.contentIndex).toBe(0);
       expect(event.toolCall.type).toBe("toolCall");
       expect(event.toolCall.id).toBe("toolu_01ABC");
-      expect(event.toolCall.name).toBe("read");
-      // Claude's "file_path" should be mapped to pi's "path"
-      expect(event.toolCall.arguments).toEqual({ path: "/foo.ts" });
+      expect(event.toolCall.name).toBe("lookup");
+      // Claude's "query" should be mapped to pi's "path"
+      expect(event.toolCall.arguments).toEqual({ query: "/foo.ts" });
     });
 
     it("tracks multiple tool_use blocks independently by Claude event.index", () => {
@@ -451,14 +470,18 @@ describe("createEventBridge", () => {
       bridge.handleEvent({
         type: "content_block_start",
         index: 0,
-        content_block: { type: "tool_use", id: "toolu_01", name: "Read" },
+        content_block: {
+          type: "tool_use",
+          id: "toolu_01",
+          name: "mcp__custom-tools__lookup",
+        },
       });
       bridge.handleEvent({
         type: "content_block_delta",
         index: 0,
         delta: {
           type: "input_json_delta",
-          partial_json: '{"file_path": "/a.ts"}',
+          partial_json: '{"query": "/a.ts"}',
         },
       });
       bridge.handleEvent({
@@ -470,14 +493,18 @@ describe("createEventBridge", () => {
       bridge.handleEvent({
         type: "content_block_start",
         index: 1,
-        content_block: { type: "tool_use", id: "toolu_02", name: "Write" },
+        content_block: {
+          type: "tool_use",
+          id: "toolu_02",
+          name: "mcp__custom-tools__store",
+        },
       });
       bridge.handleEvent({
         type: "content_block_delta",
         index: 1,
         delta: {
           type: "input_json_delta",
-          partial_json: '{"file_path": "/b.ts", "content": "hello"}',
+          partial_json: '{"query": "/b.ts", "content": "hello"}',
         },
       });
       bridge.handleEvent({
@@ -491,12 +518,12 @@ describe("createEventBridge", () => {
       ) as any[];
       expect(endEvents).toHaveLength(2);
       expect(endEvents[0].toolCall.id).toBe("toolu_01");
-      expect(endEvents[0].toolCall.name).toBe("read");
-      expect(endEvents[0].toolCall.arguments).toEqual({ path: "/a.ts" });
+      expect(endEvents[0].toolCall.name).toBe("lookup");
+      expect(endEvents[0].toolCall.arguments).toEqual({ query: "/a.ts" });
       expect(endEvents[1].toolCall.id).toBe("toolu_02");
-      expect(endEvents[1].toolCall.name).toBe("write");
+      expect(endEvents[1].toolCall.name).toBe("store");
       expect(endEvents[1].toolCall.arguments).toEqual({
-        path: "/b.ts",
+        query: "/b.ts",
         content: "hello",
       });
     });
@@ -524,14 +551,18 @@ describe("createEventBridge", () => {
       bridge.handleEvent({
         type: "content_block_start",
         index: 1,
-        content_block: { type: "tool_use", id: "toolu_01", name: "Read" },
+        content_block: {
+          type: "tool_use",
+          id: "toolu_01",
+          name: "mcp__custom-tools__lookup",
+        },
       });
       bridge.handleEvent({
         type: "content_block_delta",
         index: 1,
         delta: {
           type: "input_json_delta",
-          partial_json: '{"file_path": "/foo.ts"}',
+          partial_json: '{"query": "/foo.ts"}',
         },
       });
       bridge.handleEvent({
@@ -544,7 +575,7 @@ describe("createEventBridge", () => {
       expect((output.content[0] as any).type).toBe("text");
       expect((output.content[0] as any).text).toBe("Let me read that file.");
       expect((output.content[1] as any).type).toBe("toolCall");
-      expect((output.content[1] as any).name).toBe("read");
+      expect((output.content[1] as any).name).toBe("lookup");
 
       // Verify contentIndex values
       const textStart = stream.events.find(
@@ -562,7 +593,11 @@ describe("createEventBridge", () => {
       bridge.handleEvent({
         type: "content_block_start",
         index: 0,
-        content_block: { type: "tool_use", id: "toolu_01", name: "Bash" },
+        content_block: {
+          type: "tool_use",
+          id: "toolu_01",
+          name: "mcp__custom-tools__run",
+        },
       });
 
       // Partial JSON that cannot be parsed yet
@@ -593,7 +628,11 @@ describe("createEventBridge", () => {
       bridge.handleEvent({
         type: "content_block_start",
         index: 0,
-        content_block: { type: "tool_use", id: "toolu_01", name: "Read" },
+        content_block: {
+          type: "tool_use",
+          id: "toolu_01",
+          name: "mcp__custom-tools__lookup",
+        },
       });
 
       // Send invalid JSON that will never parse
@@ -624,14 +663,18 @@ describe("createEventBridge", () => {
       bridge.handleEvent({
         type: "content_block_start",
         index: 0,
-        content_block: { type: "tool_use", id: "toolu_01", name: "Read" },
+        content_block: {
+          type: "tool_use",
+          id: "toolu_01",
+          name: "mcp__custom-tools__lookup",
+        },
       });
       bridge.handleEvent({
         type: "content_block_delta",
         index: 0,
         delta: {
           type: "input_json_delta",
-          partial_json: '{"file_path": "/foo"}',
+          partial_json: '{"query": "/foo"}',
         },
       });
       bridge.handleEvent({ type: "content_block_stop", index: 0 });
@@ -667,14 +710,18 @@ describe("createEventBridge", () => {
       bridge.handleEvent({
         type: "content_block_start",
         index: 1,
-        content_block: { type: "tool_use", id: "toolu_01", name: "Read" },
+        content_block: {
+          type: "tool_use",
+          id: "toolu_01",
+          name: "mcp__custom-tools__lookup",
+        },
       });
       bridge.handleEvent({
         type: "content_block_delta",
         index: 1,
         delta: {
           type: "input_json_delta",
-          partial_json: '{"file_path": "/test.ts"}',
+          partial_json: '{"query": "/test.ts"}',
         },
       });
       bridge.handleEvent({ type: "content_block_stop", index: 1 });
@@ -688,8 +735,8 @@ describe("createEventBridge", () => {
       expect(output.content[1]).toEqual({
         type: "toolCall",
         id: "toolu_01",
-        name: "read",
-        arguments: { path: "/test.ts" },
+        name: "lookup",
+        arguments: { query: "/test.ts" },
       });
     });
   });
@@ -1109,15 +1156,32 @@ describe("createEventBridge", () => {
       expect(stream.push).not.toHaveBeenCalled();
     });
 
-    it("allows built-in tools (Read, Write, etc.)", () => {
+    // Observer mode: built-ins execute natively in the CLI and must NOT
+    // become pi toolCalls — they surface as markers via the envelope path.
+    it("filters built-in tools (Read, Write, etc.) — the CLI executes them", () => {
       const bridge = createBridgeWithStart();
       bridge.handleEvent({
         type: "content_block_start",
         index: 0,
         content_block: { type: "tool_use", id: "toolu_read01", name: "Read" },
       });
+      expect(stream.push).not.toHaveBeenCalled();
+    });
+
+    it("allows handoff tools (mcp__custom-tools__*)", () => {
+      const bridge = createBridgeWithStart();
+      bridge.handleEvent({
+        type: "content_block_start",
+        index: 0,
+        content_block: {
+          type: "tool_use",
+          id: "toolu_h01",
+          name: "mcp__custom-tools__deploy",
+        },
+      });
       expect(stream.push).toHaveBeenCalledTimes(1);
       expect((stream.events[0] as any).type).toBe("toolcall_start");
+      expect((stream.events[0] as any).partial.content[0].name).toBe("deploy");
     });
 
     it("silently drops deltas and stop events for filtered tools", () => {
