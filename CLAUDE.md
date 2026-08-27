@@ -22,6 +22,27 @@ npx vitest                                          # watch mode
 
 CI (`.github/workflows/ci.yml`) runs lint + format:check, typecheck, and `test:coverage` on Ubuntu/Windows/macOS. A husky pre-commit hook runs lint-staged (eslint --fix + prettier). Cross-platform correctness is a real constraint — Windows is in the test matrix, so subprocess and path handling must not assume POSIX.
 
+## Releasing
+
+The `Publish` workflow ships **only when `package.json` carries a version npm
+does not already have.** It does not bump anything for you. So the release flow
+is: bump the version _in the PR_, merge, and the workflow publishes and tags.
+
+A merge without a bump is a green run that publishes nothing. That is correct
+for a stacked PR, and a trap otherwise — observer mode (#17) merged, went
+green, and left every user on the previous build. Two guards now make it
+visible rather than silent:
+
+- **CI, on the PR** (`release-reminder`): warns when the diff touches shipped
+  code (`index.ts`, `src/`) but the version is unchanged. A warning, not a
+  failure, because stacking PRs and releasing once is legitimate.
+- **Publish, on the merge**: annotates the run and the summary when it skips,
+  saying which version it saw and what to do about it.
+
+```bash
+npm version patch --no-git-tag-version   # or minor / major
+```
+
 ## Architecture
 
 The request flow, entry to exit:

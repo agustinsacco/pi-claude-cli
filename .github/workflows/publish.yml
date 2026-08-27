@@ -1,8 +1,14 @@
 name: Publish
 # Publishes when the version in package.json is new to npm. The normal flow
 # is: bump the version in a PR, merge to main, and this workflow publishes
-# and tags it. Tag pushes and manual dispatch also work; merges whose
-# version is already on npm are a green no-op.
+# and tags it. Tag pushes and manual dispatch also work.
+#
+# A merge whose version is already on npm publishes nothing. That is correct —
+# most merges are not releases — but it used to be SILENT, and a green check on
+# a feature merge reads as "shipped". It was not: observer mode (#17) merged,
+# went green, published nothing, and users stayed on the old build for a day
+# while the bug it fixed kept costing tokens. So a skip now annotates the run
+# and says exactly what to do about it.
 on:
   push:
     branches: [main]
@@ -57,6 +63,25 @@ jobs:
             echo "new=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # Says out loud that this run shipped nothing. Without it the only signal
+      # is a green check, which is indistinguishable from a successful release.
+      - name: Warn when a main merge publishes nothing
+        if: steps.version.outputs.new == 'false' && github.event_name == 'push'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          echo "::warning title=No release published::package.json is still $VERSION, which is already on npm. This merge changed code but shipped nothing. Bump the version and merge again to release."
+          {
+            echo "### No release published"
+            echo
+            echo "\`package.json\` is still **$VERSION**, already on npm, so this run published nothing."
+            echo
+            echo "If this merge was meant to ship, bump the version and merge again:"
+            echo
+            echo '```bash'
+            echo "npm version patch --no-git-tag-version   # or minor / major"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - run: npm run test
 
       - name: Publish to npm
@@ -71,3 +96,14 @@ jobs:
         with:
           tag_name: v${{ steps.version.outputs.version }}
           generate_release_notes: true
+
+      - name: Say what shipped
+        if: steps.version.outputs.new == 'true'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          echo "::notice title=Published::${{ steps.version.outputs.name }}@$VERSION is live on npm."
+          {
+            echo "### Published"
+            echo
+            echo "**${{ steps.version.outputs.name }}@$VERSION** is live on npm and tagged \`v$VERSION\`."
+          } >> "$GITHUB_STEP_SUMMARY"
