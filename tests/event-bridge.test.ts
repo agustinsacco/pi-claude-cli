@@ -1436,4 +1436,106 @@ describe("createEventBridge", () => {
       expect(bridge.getOutput().usage.output).toBe(0);
     });
   });
+
+  describe("applyResult accounting", () => {
+    /**
+     * `result.usage` is the main agent only. Sub-agents run inside the CLI,
+     * never appear in the parent stream, and show up only in `modelUsage` —
+     * so billing from `usage` hid the majority of a fan-out turn's spend.
+     */
+    it("bills sub-agent spend from modelUsage, not the main-agent usage", () => {
+      const bridge = createBridgeWithStart();
+      bridge.applyResult({
+        type: "result",
+        subtype: "success",
+        // Main agent alone.
+        usage: {
+          input_tokens: 4,
+          output_tokens: 342,
+          cache_read_input_tokens: 74562,
+          cache_creation_input_tokens: 26808,
+        },
+        // Main agent + one synchronous sub-agent on the same model, plus the
+        // haiku auto-titler. Real figures from a captured episode.
+        modelUsage: {
+          "claude-sonnet-5": {
+            inputTokens: 8,
+            outputTokens: 576,
+            cacheReadInputTokens: 102641,
+            cacheCreationInputTokens: 56920,
+          },
+          "claude-haiku-4-5-20251001": {
+            inputTokens: 1352,
+            outputTokens: 16,
+            cacheReadInputTokens: 0,
+            cacheCreationInputTokens: 0,
+          },
+        },
+      });
+
+      const usage = bridge.getOutput().usage;
+      expect(usage.input).toBe(8 + 1352);
+      expect(usage.output).toBe(576 + 16);
+      expect(usage.cacheRead).toBe(102641);
+      expect(usage.cacheWrite).toBe(56920);
+      // The old behaviour: the sub-agent's 28,079 cache-read tokens missing.
+      expect(usage.cacheRead).not.toBe(74562);
+    });
+
+    it("falls back to result.usage when the CLI sends no modelUsage", () => {
+      const bridge = createBridgeWithStart();
+      bridge.applyResult({
+        type: "result",
+        subtype: "success",
+        usage: {
+          input_tokens: 4,
+          output_tokens: 342,
+          cache_read_input_tokens: 74562,
+          cache_creation_input_tokens: 26808,
+        },
+      });
+
+      const usage = bridge.getOutput().usage;
+      expect(usage.input).toBe(4);
+      expect(usage.cacheRead).toBe(74562);
+      expect(usage.cacheWrite).toBe(26808);
+    });
+
+    it("ignores an empty modelUsage object rather than zeroing the bill", () => {
+      const bridge = createBridgeWithStart();
+      bridge.applyResult({
+        type: "result",
+        subtype: "success",
+        usage: { input_tokens: 4, cache_read_input_tokens: 74562 },
+        modelUsage: {},
+      });
+      expect(bridge.getOutput().usage.cacheRead).toBe(74562);
+    });
+
+    it("keeps the last cycle's context when the result clears the cycle", () => {
+      const bridge = createEventBridge(stream as any, model as any);
+      bridge.handleEvent({
+        type: "message_start",
+        message: {
+          usage: {
+            input_tokens: 8,
+            cache_read_input_tokens: 28096,
+            cache_creation_input_tokens: 139,
+          },
+        },
+      });
+      bridge.applyResult({
+        type: "result",
+        subtype: "success",
+        usage: {
+          input_tokens: 28,
+          output_tokens: 429,
+          cache_read_input_tokens: 64055,
+          cache_creation_input_tokens: 17662,
+        },
+      });
+      // Context is the cycle's prompt, not the episode's summed billing.
+      expect(bridge.getOutput().usage.totalTokens).toBe(8 + 28096 + 139);
+    });
+  });
 });

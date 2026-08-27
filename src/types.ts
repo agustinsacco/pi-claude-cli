@@ -7,14 +7,37 @@ export interface ClaudeStreamEventMessage {
   event: ClaudeApiEvent;
 }
 
+/**
+ * Per-model spend for the episode, keyed by model id.
+ *
+ * This is the ONLY place the CLI accounts for work done outside the main
+ * agent's own transcript: sub-agents (which run inside the CLI and never
+ * appear in the parent stream) and helper models such as the haiku
+ * auto-titler. `result.usage` covers the main agent alone.
+ *
+ * Verified 2026-08-27 on a captured episode with one synchronous sub-agent:
+ * main agent 74,562 cache-read / 26,808 cache-write, sub-agent 28,079 /
+ * 30,112, and `modelUsage` reported exactly the two summed — 102,641 /
+ * 56,920.
+ */
+export interface ClaudeModelUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadInputTokens?: number;
+  cacheCreationInputTokens?: number;
+  costUSD?: number;
+}
+
 export interface ClaudeResultMessage {
   type: "result";
   subtype: "success" | "error";
   result?: string;
   error?: string;
   session_id?: string;
-  /** Cumulative usage across every cycle of the episode (authoritative). */
+  /** Cumulative usage for the MAIN agent across every cycle of the episode. */
   usage?: ClaudeUsage;
+  /** Per-model spend, including sub-agents and helper models. */
+  modelUsage?: Record<string, ClaudeModelUsage>;
   num_turns?: number;
   total_cost_usd?: number;
 }
