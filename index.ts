@@ -16,6 +16,7 @@ import {
 } from "./src/process-manager.js";
 import { getCustomToolDefs, writeMcpConfig } from "./src/mcp-config.js";
 import { rewriteOverflowMessage } from "./src/overflow.js";
+import { buildRateLimitPayload, rateLimitIdentity } from "./src/rate-limit.js";
 
 // Kill all active Claude subprocesses on process exit to prevent orphans
 process.on("exit", killAllProcesses);
@@ -40,21 +41,18 @@ let lastRateLimitJson: string | undefined;
 function publishRateLimit(info: Record<string, unknown>): void {
   const setStatus = uiContext?.ui?.setStatus;
   if (typeof setStatus !== "function") return;
-  const payload = JSON.stringify({
-    status: info.status,
-    resetsAt: info.resetsAt,
-    rateLimitType: info.rateLimitType,
-    overageStatus: info.overageStatus,
-    isUsingOverage: info.isUsingOverage === true,
-    observedAt: Math.floor(Date.now() / 1000),
-  });
+  const payload = buildRateLimitPayload(info);
   // Push only on change: the event repeats every turn, and a status that
   // rewrites itself constantly is noise for whatever renders it.
-  const withoutObservedAt = payload.replace(/,"observedAt":\d+/, "");
-  if (withoutObservedAt === lastRateLimitJson) return;
-  lastRateLimitJson = withoutObservedAt;
+  const identity = rateLimitIdentity(payload);
+  if (identity === lastRateLimitJson) return;
+  lastRateLimitJson = identity;
   try {
-    setStatus.call(uiContext!.ui, RATE_LIMIT_STATUS_KEY, payload);
+    setStatus.call(
+      uiContext!.ui,
+      RATE_LIMIT_STATUS_KEY,
+      JSON.stringify(payload),
+    );
   } catch {
     /* never break a turn over a status push */
   }
