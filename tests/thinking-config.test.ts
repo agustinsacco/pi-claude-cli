@@ -1,28 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { mapThinkingEffort, isOpusModel } from "../src/thinking-config";
+import { mapThinkingEffort } from "../src/thinking-config";
 import type { ThinkingBudgets } from "@earendil-works/pi-ai";
-
-describe("isOpusModel", () => {
-  it("returns true for claude-opus-4-6-20260301", () => {
-    expect(isOpusModel("claude-opus-4-6-20260301")).toBe(true);
-  });
-
-  it("returns false for claude-sonnet-4-5-20250929", () => {
-    expect(isOpusModel("claude-sonnet-4-5-20250929")).toBe(false);
-  });
-
-  it("returns true for future Opus models (forward-compatible)", () => {
-    expect(isOpusModel("claude-opus-5-20270101")).toBe(true);
-  });
-
-  it("returns false for non-Opus model strings", () => {
-    expect(isOpusModel("claude-haiku-3-5-20240307")).toBe(false);
-  });
-
-  it("returns false for Fable models (Mythos-class, not Opus)", () => {
-    expect(isOpusModel("claude-fable-5")).toBe(false);
-  });
-});
 
 describe("mapThinkingEffort", () => {
   describe("undefined reasoning", () => {
@@ -83,7 +61,7 @@ describe("mapThinkingEffort", () => {
     });
   });
 
-  describe("Opus model mapping (elevated)", () => {
+  describe("Opus model mapping (1:1, same as every other model)", () => {
     const model = "claude-opus-4-6-20260301";
 
     it("maps minimal to low", () => {
@@ -94,20 +72,58 @@ describe("mapThinkingEffort", () => {
       expect(mapThinkingEffort("low", model, undefined)).toBe("low");
     });
 
-    it("maps medium to high (shifted up)", () => {
-      expect(mapThinkingEffort("medium", model, undefined)).toBe("high");
+    it("maps medium to medium, not high", () => {
+      expect(mapThinkingEffort("medium", model, undefined)).toBe("medium");
     });
 
-    it("maps high to max (shifted up)", () => {
-      expect(mapThinkingEffort("high", model, undefined)).toBe("max");
+    it("maps high to high, not max", () => {
+      expect(mapThinkingEffort("high", model, undefined)).toBe("high");
     });
 
-    it("maps xhigh to max", () => {
-      expect(mapThinkingEffort("xhigh", model, undefined)).toBe("max");
+    it("maps xhigh to xhigh, not max", () => {
+      expect(mapThinkingEffort("xhigh", model, undefined)).toBe("xhigh");
     });
 
     it("maps max to max", () => {
       expect(mapThinkingEffort("max", model, undefined)).toBe("max");
+    });
+  });
+
+  describe("no level is ever escalated above what the host asked for", () => {
+    const RANK = ["low", "medium", "high", "xhigh", "max"];
+    const LEVELS = [
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ] as const;
+    const MODELS = [
+      "claude-opus-5",
+      "claude-opus-4-6-20260301",
+      "claude-sonnet-5",
+      "claude-fable-5",
+      "claude-haiku-4-5-20251001",
+      undefined,
+    ];
+
+    // Regression guard for #22: an opus shift made `high` unrequestable and
+    // handed skills their widest sub-agent fan-out tier unasked.
+    it.each(MODELS)("never maps above the requested rung on %s", (model) => {
+      for (const level of LEVELS) {
+        const got = mapThinkingEffort(level, model, undefined)!;
+        const asked = RANK.indexOf(level === "minimal" ? "low" : level);
+        expect(RANK.indexOf(got)).toBeLessThanOrEqual(asked);
+      }
+    });
+
+    it("maps every rung the CLI has identically for opus and sonnet", () => {
+      for (const level of LEVELS) {
+        expect(mapThinkingEffort(level, "claude-opus-5", undefined)).toBe(
+          mapThinkingEffort(level, "claude-sonnet-5", undefined),
+        );
+      }
     });
   });
 
@@ -153,7 +169,7 @@ describe("mapThinkingEffort", () => {
         "claude-opus-4-6-20260301",
         budgets,
       );
-      expect(result).toBe("max");
+      expect(result).toBe("high");
     });
   });
 
