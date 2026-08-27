@@ -257,7 +257,9 @@ describe("createEventBridge", () => {
 
       const output = bridge.getOutput();
       expect(output.usage.output).toBe(42);
-      expect(output.usage.totalTokens).toBe(142);
+      // totalTokens is the cycle's PROMPT (what pi reads as context), so the
+      // 42 output tokens are billed but do not occupy the window.
+      expect(output.usage.totalTokens).toBe(100);
     });
   });
 

@@ -131,8 +131,34 @@ export function createEventBridge(
     cache_creation_input_tokens: 0,
   };
   let cycleUsage: ClaudeUsage = {};
+  /**
+   * Context size of the most recent cycle — what the model actually saw on
+   * its last call, which is NOT the episode's summed usage.
+   *
+   * pi reads `usage.totalTokens` as the conversation's context size
+   * (`calculateContextTokens` in pi's compaction module short-circuits on it)
+   * and uses it for both the context gauge and the auto-compaction trigger.
+   * Every cycle re-sends the same cached prefix, so summing cycles counts
+   * that prefix once per cycle: a captured 3-cycle episode sums to 82,174
+   * while the model's real context never exceeded 28,243. The host then
+   * showed 41% of a 200k window instead of 14%, and a long enough turn
+   * crossed pi's compaction threshold at a fraction of true occupancy.
+   *
+   * So the four component figures stay cumulative — they are what gets
+   * billed — and `totalTokens` carries the last cycle's context instead.
+   */
+  let lastCycleContext = 0;
   /** Tool ids already surfaced as markers (envelope arrives once per block). */
   const markedToolIds = new Set<string>();
+
+  /** Prompt size of one cycle: everything the model read, excluding output. */
+  function contextOf(usage: ClaudeUsage): number {
+    return (
+      (usage.input_tokens ?? 0) +
+      (usage.cache_read_input_tokens ?? 0) +
+      (usage.cache_creation_input_tokens ?? 0)
+    );
+  }
 
   function recomputeUsage(): void {
     output.usage.input =
@@ -145,11 +171,18 @@ export function createEventBridge(
     output.usage.cacheWrite =
       cumulativeUsage.cache_creation_input_tokens +
       (cycleUsage.cache_creation_input_tokens ?? 0);
+    // Latch the newest cycle we have numbers for. `applyResult` clears
+    // cycleUsage, so a zero here means "no fresher figure", never "empty
+    // context" — the last latched value must survive.
+    const cycleContext = contextOf(cycleUsage);
+    if (cycleContext > 0) lastCycleContext = cycleContext;
     output.usage.totalTokens =
-      output.usage.input +
-      output.usage.output +
-      output.usage.cacheRead +
-      output.usage.cacheWrite;
+      lastCycleContext > 0
+        ? lastCycleContext
+        : output.usage.input +
+          output.usage.output +
+          output.usage.cacheRead +
+          output.usage.cacheWrite;
     calculateCost(model, output.usage);
   }
 
