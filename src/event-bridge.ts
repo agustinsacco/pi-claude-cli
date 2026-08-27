@@ -1,6 +1,7 @@
 import type {
   ClaudeApiEvent,
   ClaudeAssistantEnvelope,
+  ClaudeModelUsage,
   ClaudeResultMessage,
   ClaudeUsage,
   TrackedContentBlock,
@@ -150,6 +151,40 @@ export function createEventBridge(
   let lastCycleContext = 0;
   /** Tool ids already surfaced as markers (envelope arrives once per block). */
   const markedToolIds = new Set<string>();
+
+  /**
+   * Fold per-model spend into one `ClaudeUsage`.
+   *
+   * Every entry counts, including models the session did not pick: a
+   * sub-agent may run a different model, and the auto-titler always does.
+   * Returns undefined when the CLI sent no `modelUsage` (older versions), so
+   * the caller can fall back to the main-agent-only `usage`.
+   *
+   * The folded tokens are priced at the SESSION's model rates by
+   * `calculateCost`. That is exact for sub-agents, which inherit the session
+   * model, and slightly off for a cheaper helper model — a known skew worth
+   * far less than the tokens it stops hiding.
+   */
+  function sumModelUsage(
+    modelUsage: Record<string, ClaudeModelUsage> | undefined,
+  ): ClaudeUsage | undefined {
+    if (!modelUsage) return undefined;
+    const entries = Object.values(modelUsage);
+    if (entries.length === 0) return undefined;
+    const total = {
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+    };
+    for (const entry of entries) {
+      total.input_tokens += entry.inputTokens ?? 0;
+      total.output_tokens += entry.outputTokens ?? 0;
+      total.cache_read_input_tokens += entry.cacheReadInputTokens ?? 0;
+      total.cache_creation_input_tokens += entry.cacheCreationInputTokens ?? 0;
+    }
+    return total;
+  }
 
   /** Prompt size of one cycle: everything the model read, excluding output. */
   function contextOf(usage: ClaudeUsage): number {
@@ -569,19 +604,28 @@ export function createEventBridge(
   }
 
   function applyResult(result: ClaudeResultMessage): void {
-    // Authoritative cumulative usage for the whole episode (verified to
-    // equal the per-cycle sums on captured streams; trusted over them).
-    const usage = result.usage;
-    if (usage) {
+    // Authoritative spend for the whole episode. `modelUsage` is preferred
+    // over `usage` because `usage` is the MAIN AGENT ONLY: sub-agents run
+    // inside the CLI and never appear in the parent stream, so their tokens
+    // — often the majority — were simply missing from what the host billed.
+    // Same for helper models like the haiku auto-titler.
+    //
+    // Measured 2026-08-27: a lane's turn reported $2.34 while seven
+    // sub-agents spent 28.6M cache-read tokens on top of it, a 10x
+    // under-report. On a captured single-sub-agent episode `modelUsage`
+    // summed to exactly main + sub-agent (102,641 cache-read / 56,920
+    // cache-write), which is why it is trusted here.
+    const totals = sumModelUsage(result.modelUsage) ?? result.usage;
+    if (totals) {
       cumulativeUsage.input_tokens =
-        usage.input_tokens ?? cumulativeUsage.input_tokens;
+        totals.input_tokens ?? cumulativeUsage.input_tokens;
       cumulativeUsage.output_tokens =
-        usage.output_tokens ?? cumulativeUsage.output_tokens;
+        totals.output_tokens ?? cumulativeUsage.output_tokens;
       cumulativeUsage.cache_read_input_tokens =
-        usage.cache_read_input_tokens ??
+        totals.cache_read_input_tokens ??
         cumulativeUsage.cache_read_input_tokens;
       cumulativeUsage.cache_creation_input_tokens =
-        usage.cache_creation_input_tokens ??
+        totals.cache_creation_input_tokens ??
         cumulativeUsage.cache_creation_input_tokens;
       cycleUsage = {};
       recomputeUsage();

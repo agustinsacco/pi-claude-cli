@@ -127,6 +127,34 @@ summing to 2.08M against a real 104k) pushed pi past its compaction threshold
 at a tenth of true occupancy — discarding history the window had ample room
 for. Guarded by `tests/multi-cycle.test.ts`.
 
+### Billing reads `modelUsage`, not `usage` (0.4.10)
+
+`result.usage` is the **main agent only**. Claude Code sub-agents run inside
+the CLI: they never appear in the parent SSE stream, and their tokens are not
+in `result.usage`. Neither is the haiku auto-titler's.
+
+`result.modelUsage` is the per-model account of everything the episode spent,
+and it is what the bridge folds into the cumulative components. Verified on a
+captured episode with one synchronous sub-agent:
+
+|                             | cache read  | cache write |
+| --------------------------- | ----------- | ----------- |
+| main agent (`result.usage`) | 74,562      | 26,808      |
+| sub-agent (own transcript)  | 28,079      | 30,112      |
+| `modelUsage` summed         | **102,641** | **56,920**  |
+
+Exact to the token. Without this, a lane that fanned out to seven sub-agents
+reported \$2.34 for a turn that really spent about \$24 — the sub-agents'
+28.6M cache-read tokens were simply absent.
+
+Two caveats, both deliberate:
+
+- Folded tokens are priced at the **session's** model rates. Exact for
+  sub-agents, which inherit the session model; slightly off for a cheaper
+  helper model, which is worth far less than the tokens it stops hiding.
+- Older CLIs send no `modelUsage`. The bridge falls back to `result.usage`,
+  and an empty object is treated as absent rather than as a zero bill.
+
 ### Thinking blocks are materialized lazily (0.4.4)
 
 Most Claude models stream **encrypted** thinking: a multi-kilobyte
@@ -372,17 +400,17 @@ fires, and the turn looks truncated. This was the root cause behind every
 
 ## Version history of behavioral fixes
 
-| Version | Change                                                                                                                              |
-| ------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| 0.4.0   | Port to `@earendil-works` pi 0.84; api-registry registration; scoped release                                                        |
-| 0.4.1   | 2.x control protocol; cycle-aware bridge (ordering, cumulative usage, final-answer safety net); CLI-side tool markers; 300s timeout |
-| 0.4.2   | Resume-miss → one full-replay retry (fixes forked sessions)                                                                         |
-| 0.4.3   | Overflow → `context_length_exceeded` rewrite (pi auto-compaction); hermetic mode                                                    |
-| 0.4.4   | Lazy thinking materialization (no empty blocks for encrypted thinking); explicit `contentIndex` per tracked block                   |
-| 0.4.5   | `rate_limit_event` → `claude-rate-limit` status key for front-ends                                                                  |
-| 0.4.6   | Resume delta anchors on the last **assistant** message — stops full-transcript replay on every tool iteration                       |
-| 0.4.9   | `utilization` on `claude-rate-limit` (percentage of the binding window)                                                             |
-| 0.4.10  | `usage.totalTokens` = last cycle's prompt, not the summed cycles — fixes inflated context gauges and premature auto-compaction      |
+| Version | Change                                                                                                                                                                                                |
+| ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0.4.0   | Port to `@earendil-works` pi 0.84; api-registry registration; scoped release                                                                                                                          |
+| 0.4.1   | 2.x control protocol; cycle-aware bridge (ordering, cumulative usage, final-answer safety net); CLI-side tool markers; 300s timeout                                                                   |
+| 0.4.2   | Resume-miss → one full-replay retry (fixes forked sessions)                                                                                                                                           |
+| 0.4.3   | Overflow → `context_length_exceeded` rewrite (pi auto-compaction); hermetic mode                                                                                                                      |
+| 0.4.4   | Lazy thinking materialization (no empty blocks for encrypted thinking); explicit `contentIndex` per tracked block                                                                                     |
+| 0.4.5   | `rate_limit_event` → `claude-rate-limit` status key for front-ends                                                                                                                                    |
+| 0.4.6   | Resume delta anchors on the last **assistant** message — stops full-transcript replay on every tool iteration                                                                                         |
+| 0.4.9   | `utilization` on `claude-rate-limit` (percentage of the binding window)                                                                                                                               |
+| 0.4.10  | `usage.totalTokens` = last cycle's prompt, not the summed cycles (fixes inflated context gauges and premature auto-compaction); billing reads `modelUsage`, so sub-agent spend is no longer invisible |
 
 ## Testing
 

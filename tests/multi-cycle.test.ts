@@ -244,11 +244,16 @@ describe("multi-cycle episodes (issue #3)", () => {
     );
   });
 
-  it("bills the episode's cumulative usage", async () => {
+  it("bills every model the episode used, not just the main agent", async () => {
     const { message } = await runEpisode();
-    // Authoritative totals from the result envelope (equal to per-cycle sums).
-    expect(message.usage.input).toBe(28);
-    expect(message.usage.output).toBe(429);
+
+    // `result.usage` covers the MAIN AGENT only: 28 / 429 / 64055 / 17662.
+    // `result.modelUsage` adds the work that never reaches the parent stream
+    // — here the haiku auto-titler's 906 input + 12 output. In the wild that
+    // slice is sub-agents, and it dwarfed the main agent (28.6M cache-read
+    // tokens against 1.96M, reported as $2.34 of a real ~$24).
+    expect(message.usage.input).toBe(28 + 906);
+    expect(message.usage.output).toBe(429 + 12);
     expect(message.usage.cacheRead).toBe(64055);
     expect(message.usage.cacheWrite).toBe(17662);
   });
