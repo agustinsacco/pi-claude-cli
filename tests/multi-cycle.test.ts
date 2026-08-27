@@ -244,14 +244,30 @@ describe("multi-cycle episodes (issue #3)", () => {
     );
   });
 
-  it("reports the episode's cumulative usage, not the last cycle's", async () => {
+  it("bills the episode's cumulative usage", async () => {
     const { message } = await runEpisode();
     // Authoritative totals from the result envelope (equal to per-cycle sums).
     expect(message.usage.input).toBe(28);
     expect(message.usage.output).toBe(429);
     expect(message.usage.cacheRead).toBe(64055);
     expect(message.usage.cacheWrite).toBe(17662);
-    expect(message.usage.totalTokens).toBe(28 + 429 + 64055 + 17662);
+  });
+
+  it("reports context as the last cycle's prompt, not the summed cycles", async () => {
+    const { message } = await runEpisode();
+
+    // Per-cycle prompt sizes in the capture: the prefix is re-read every
+    // cycle, so it appears in all three.
+    //   cycle 0: 10 + 17825 + 7561 = 25396
+    //   cycle 1: 10 + 18134 + 9962 = 28106
+    //   cycle 2:  8 + 28096 +  139 = 28243
+    // pi treats totalTokens as context, so only the last one is right.
+    expect(message.usage.totalTokens).toBe(8 + 28096 + 139);
+
+    // Guard the regression explicitly: the old value was the sum of all four
+    // cumulative components, 2.9x the real context on this 3-cycle episode.
+    expect(message.usage.totalTokens).not.toBe(28 + 429 + 64055 + 17662);
+    expect(message.usage.totalTokens).toBeLessThan(message.usage.cacheRead);
   });
 
   it("sums per-cycle usage when the episode ends without a result envelope", async () => {
@@ -284,6 +300,8 @@ describe("multi-cycle episodes (issue #3)", () => {
     expect(done.message.usage.output).toBe(250);
     expect(done.message.usage.cacheRead).toBe(17825 + 18134);
     expect(done.message.usage.cacheWrite).toBe(7561 + 9962);
+    // Context still tracks the newest cycle even with no result envelope.
+    expect(done.message.usage.totalTokens).toBe(10 + 18134 + 9962);
   });
 });
 

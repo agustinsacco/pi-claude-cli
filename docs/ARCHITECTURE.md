@@ -101,6 +101,32 @@ cycle's `stop_reason` is the episode's stop reason.
 Before this was understood, later-cycle content folded into earlier blocks,
 usage reported roughly one cycle, and the final answer could be lost.
 
+### Billed usage and context are different numbers (0.4.10)
+
+`usage.input/output/cacheRead/cacheWrite` are **cumulative across cycles** —
+that is what the account is charged for. `usage.totalTokens` is **not their
+sum**: it carries the _last_ cycle's prompt size
+(`input + cache_read + cache_creation`), because that is the only figure that
+describes the conversation the model is actually holding.
+
+The distinction is load-bearing, not cosmetic. pi's
+`calculateContextTokens()` short-circuits on `totalTokens` and feeds it to
+both the host's context gauge and `shouldCompact()`. Every cycle re-sends the
+same cached prefix, so the sum counts that prefix once per cycle:
+
+| captured 3-cycle episode | tokens |
+| ------------------------ | ------ |
+| cycle 0 prompt           | 25,396 |
+| cycle 1 prompt           | 28,106 |
+| cycle 2 prompt           | 28,243 |
+| **summed usage**         | 82,174 |
+
+The model never held more than 28,243. Reporting 82,174 showed 41% of a 200k
+window instead of 14%, and a long turn (26 cycles was observed in the wild,
+summing to 2.08M against a real 104k) pushed pi past its compaction threshold
+at a tenth of true occupancy — discarding history the window had ample room
+for. Guarded by `tests/multi-cycle.test.ts`.
+
 ### Thinking blocks are materialized lazily (0.4.4)
 
 Most Claude models stream **encrypted** thinking: a multi-kilobyte
@@ -355,6 +381,8 @@ fires, and the turn looks truncated. This was the root cause behind every
 | 0.4.4   | Lazy thinking materialization (no empty blocks for encrypted thinking); explicit `contentIndex` per tracked block                   |
 | 0.4.5   | `rate_limit_event` → `claude-rate-limit` status key for front-ends                                                                  |
 | 0.4.6   | Resume delta anchors on the last **assistant** message — stops full-transcript replay on every tool iteration                       |
+| 0.4.9   | `utilization` on `claude-rate-limit` (percentage of the binding window)                                                             |
+| 0.4.10  | `usage.totalTokens` = last cycle's prompt, not the summed cycles — fixes inflated context gauges and premature auto-compaction      |
 
 ## Testing
 
