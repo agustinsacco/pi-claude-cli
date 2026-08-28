@@ -51,6 +51,9 @@ Requires the `claude` binary on your login-shell PATH (`npm install -g @anthropi
 - Surfaces sub-agent fan-outs: one marker when a `Task` agent starts and one
   when it reports, plus live per-agent progress on the `claude-subagents`
   status key — so a fan-out is no longer a blank pane
+- Background sub-agents get to finish: a `result` while agents are still
+  running ends a cycle, not the turn, so their reports reach the model
+  instead of dying with the subprocess
 - Configurable thinking effort across the full ladder (low to max), mapped 1:1 for every model: the level the host asks for is the level the CLI gets
 - Cross-platform subprocess management (Windows, macOS, Linux)
 - Inactivity timeout and process registry for cleanup
