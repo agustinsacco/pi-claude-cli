@@ -40,6 +40,8 @@ import {
 } from "./process-manager.js";
 import { parseLine } from "./stream-parser.js";
 import { createEventBridge } from "./event-bridge.js";
+import { createTaskTracker, isTaskSubtype } from "./task-tracker.js";
+import type { TaskTrackerState } from "./types.js";
 import { handleControlRequest } from "./control-handler.js";
 import { mapThinkingEffort } from "./thinking-config.js";
 import { isHandoffClaudeTool } from "./tool-mapping.js";
@@ -66,6 +68,12 @@ type StreamViaCLiOptions = SimpleStreamOptions & {
   mcpConfigPath?: string;
   /** Called with account rate-limit state as the CLI reports it. */
   onRateLimit?: (info: Record<string, unknown>) => void;
+  /**
+   * Called with live sub-agent state as the CLI reports it. Ephemeral: this is
+   * progress, not transcript, and must never be folded into turn content. The
+   * durable half (start/finish) rides in the turn as markers instead.
+   */
+  onTaskProgress?: (state: TaskTrackerState) => void;
 };
 
 /**
@@ -193,6 +201,9 @@ export function streamViaCli(
 
       // Create event bridge (before endStreamWithError so bridge is in scope)
       const bridge = createEventBridge(stream, model);
+      // Per-attempt: a resume-miss retry replays the episode, and its
+      // sub-agents must not be counted twice.
+      const taskTracker = createTaskTracker();
 
       // Guard against double stream.end() and double error events.
       // First error path wins; subsequent ones are no-ops.
@@ -348,6 +359,23 @@ export function streamViaCli(
           if (info && typeof info === "object") {
             try {
               options?.onRateLimit?.(info);
+            } catch {
+              /* a status push must never break a turn */
+            }
+          }
+        } else if (
+          msg.type === "system" &&
+          isTaskSubtype((msg as any).subtype)
+        ) {
+          // Sub-agent lifecycle. The agents' own envelopes carry
+          // parent_tool_use_id and stay internal to the CLI, but these arrive
+          // at top level even for deeply nested agents — the one channel that
+          // makes a fan-out visible at all (#23).
+          if (!selfInterrupted) {
+            const marker = taskTracker.apply(msg as any);
+            if (marker) bridge.appendMarker(marker);
+            try {
+              options?.onTaskProgress?.(taskTracker.snapshot());
             } catch {
               /* a status push must never break a turn */
             }

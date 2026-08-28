@@ -48,6 +48,9 @@ Requires the `claude` binary on your login-shell PATH (`npm install -g @anthropi
 - Native tool execution: the CLI runs its own tools; guards are injected as Claude Code PreToolUse hooks via `PI_CLAUDE_CLI_SETTINGS`
 - Reports account rate-limit state (window, reset, overage) to the front-end
   on the `claude-rate-limit` status key — never mixed into turn content
+- Surfaces sub-agent fan-outs: one marker when a `Task` agent starts and one
+  when it reports, plus live per-agent progress on the `claude-subagents`
+  status key — so a fan-out is no longer a blank pane
 - Configurable thinking effort across the full ladder (low to max), mapped 1:1 for every model: the level the host asks for is the level the CLI gets
 - Cross-platform subprocess management (Windows, macOS, Linux)
 - Inactivity timeout and process registry for cleanup

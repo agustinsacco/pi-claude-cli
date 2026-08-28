@@ -310,6 +310,152 @@ describe("multi-cycle episodes (issue #3)", () => {
   });
 });
 
+describe("sub-agent visibility (#23)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+  });
+  afterEach(() => vi.useRealTimers());
+
+  /** The real nested capture: one sub-agent that spawned another. */
+  const CAPTURE = readFileSync(
+    join(__dirname, "fixtures", "subagent-task-events.ndjson"),
+    "utf-8",
+  )
+    .split("\n")
+    .filter(Boolean);
+
+  async function runWithCapture(opts: Record<string, unknown> = {}) {
+    streamViaCli(
+      model,
+      { messages: [{ role: "user", content: "go" }] },
+      opts as any,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    const proc = (spawn as any).mock.results[0].value;
+    for (const line of CAPTURE) {
+      proc.stdout.write(line + "\n");
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    proc.stdout.write(
+      JSON.stringify({ type: "result", subtype: "success", result: "done" }) +
+        "\n",
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    proc.stdout.end();
+    proc.emit("exit", 0);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const mockStream = MockAssistantMessageEventStream.mock.instances[0];
+    const done = mockStream._events.find((e: any) => e.type === "done");
+    const markers = (done.message.content as any[])
+      .filter((c) => c.type === "text")
+      .map((c) => c.text)
+      .filter((t: string) => t.startsWith("[Claude Code · Task"));
+    return { done, markers };
+  }
+
+  it("puts one marker in the turn per sub-agent start and finish", async () => {
+    const { markers } = await runWithCapture();
+    // Two sub-agents in the capture, one nested inside the other.
+    expect(markers).toHaveLength(4);
+    expect(markers.filter((m: string) => m.includes('"started"'))).toHaveLength(
+      2,
+    );
+    expect(
+      markers.filter((m: string) => m.includes('"completed"')),
+    ).toHaveLength(2);
+    // The nested agent is named, which is the whole point: before this, a
+    // fan-out was a blank pane.
+    expect(markers.join("\n")).toContain("Explore");
+  });
+
+  it("keeps per-step progress OUT of the turn and on the status channel", async () => {
+    const seen: any[] = [];
+    const { done } = await runWithCapture({
+      onTaskProgress: (s: any) => seen.push(s),
+    });
+
+    // 3 task_progress events in the capture; none may reach the transcript.
+    const text = (done.message.content as any[])
+      .filter((c) => c.type === "text")
+      .map((c) => c.text)
+      .join("\n");
+    expect(text).not.toContain("Running Search for b.txt");
+    expect(text).not.toContain("Reading b.txt");
+
+    expect(seen.length).toBeGreaterThan(0);
+    const last = seen[seen.length - 1];
+    expect(last).toMatchObject({ active: 0, completed: 2 });
+    expect(last.tasks.map((t: any) => t.subagentType)).toEqual([
+      "general-purpose",
+      "Explore",
+    ]);
+  });
+
+  it("reports a fan-out as active while it is still running", async () => {
+    const seen: any[] = [];
+    streamViaCli(model, { messages: [{ role: "user", content: "go" }] }, {
+      onTaskProgress: (s: any) => seen.push(s),
+    } as any);
+    await vi.advanceTimersByTimeAsync(0);
+    const proc = (spawn as any).mock.results[0].value;
+
+    for (const id of ["a", "b", "c"]) {
+      proc.stdout.write(
+        JSON.stringify({
+          type: "system",
+          subtype: "task_started",
+          task_id: id,
+          description: `Angle ${id}`,
+          subagent_type: "general-purpose",
+        }) + "\n",
+      );
+      await vi.advanceTimersByTimeAsync(0);
+    }
+
+    expect(seen[seen.length - 1]).toMatchObject({ active: 3, completed: 0 });
+  });
+
+  it("ignores the other system subtypes on the same channel", async () => {
+    streamViaCli(model, { messages: [{ role: "user", content: "go" }] }, {
+      onTaskProgress: () => {
+        throw new Error("must not fire for non-task system envelopes");
+      },
+    } as any);
+    await vi.advanceTimersByTimeAsync(0);
+    const proc = (spawn as any).mock.results[0].value;
+    for (const subtype of ["init", "status", "task_summary"]) {
+      proc.stdout.write(
+        JSON.stringify({ type: "system", subtype, detail: "x" }) + "\n",
+      );
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    proc.stdout.write(
+      JSON.stringify({ type: "result", subtype: "success", result: "ok" }) +
+        "\n",
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    proc.stdout.end();
+    proc.emit("exit", 0);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const mockStream = MockAssistantMessageEventStream.mock.instances[0];
+    expect(
+      mockStream._events.find((e: any) => e.type === "done"),
+    ).toBeDefined();
+  });
+
+  it("survives a host callback that throws", async () => {
+    const { markers } = await runWithCapture({
+      onTaskProgress: () => {
+        throw new Error("host blew up");
+      },
+    });
+    expect(markers).toHaveLength(4);
+  });
+});
+
 describe("rate limit forwarding (account state, not turn content)", () => {
   beforeEach(() => {
     vi.useFakeTimers();

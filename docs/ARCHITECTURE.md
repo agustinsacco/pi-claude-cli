@@ -251,15 +251,54 @@ natural starting points if a front-end ever wants richer Claude-Code-side UX:
   `tool_result` blocks for tools the CLI executed itself. `provider.ts`
   ignores them, so markers show _what was invoked_ but never what came back.
   Surfacing them means pairing each result with its `tool_use_id`.
-- **Sub-agent episodes.** The _launch_ is visible — `Task` is a CLI-side
-  tool, so it surfaces as an ordinary marker and pidex renders those as
-  sub-agent rows — but everything the sub-agent then does arrives with
-  `parent_tool_use_id` set and is filtered out in both `provider.ts` and
-  `handleAssistantEnvelope`. Those events carry a full nested episode; a
-  front-end that wanted a live sub-agent tree would consume them there.
-  Until then, a consumer knows an agent was **launched** and nothing more —
-  no progress, no result, and no liveness (the CLI does not outlive the
-  turn), so it must not imply otherwise.
+- **Sub-agent transcripts.** What a sub-agent actually did — its own tool
+  calls and text — arrives with `parent_tool_use_id` set and is still
+  filtered out in both `provider.ts` and `handleAssistantEnvelope`. Those
+  events carry a full nested episode; a front-end that wanted a live
+  sub-agent _tree_ would consume them there. Lifecycle and progress are
+  surfaced (see below), so a consumer knows which agents ran, how long they
+  took and what they cost — but not what they read or wrote.
+
+### Sub-agent lifecycle rides its own channel (0.4.13)
+
+A fan-out used to be a blank pane. The `Task` launch surfaced as an ordinary
+marker and then nothing followed, because every envelope the sub-agents
+produced carried `parent_tool_use_id` and was dropped. One pidex turn sat
+silent for eight minutes behind 14 nested agents and was killed as hung
+(issue #23); a second-order effect made it worse, since `resetInactivityTimer`
+runs before the filter, so an invisible fan-out also never trips the 300s
+guard.
+
+The CLI already publishes what was needed, and the provider was not reading
+it: `system` envelopes with a `task_*` subtype. They arrive at **top level**
+— `parent_tool_use_id` is null — even for agents nested several deep,
+verified on claude 2.1.231 at spawn depth 2. `src/task-tracker.ts` folds
+them, and the split is by durability:
+
+| Envelope            | Where it goes                                    | Why                                                     |
+| ------------------- | ------------------------------------------------ | ------------------------------------------------------- |
+| `task_started`      | marker in the turn                               | durable: this agent ran                                 |
+| `task_notification` | marker in the turn                               | durable: it finished, with tool count, tokens, duration |
+| `task_progress`     | `onTaskProgress` → `claude-subagents` status key | ephemeral: fires once per sub-agent tool call           |
+| `task_updated`      | `onTaskProgress`                                 | ephemeral status patch                                  |
+
+Two markers per sub-agent, so the 14-agent fan-out above costs 28 lines
+rather than the ~700 that forwarding every nested tool call would have. The
+progress channel follows `claude-rate-limit`: state ABOUT the turn, never
+folded into content, and never persisted.
+
+`task_notification` carries the sub-agent's full report in `summary`. The
+marker deliberately omits it — the model already receives it as the `Task`
+tool's own result, and repeating it would duplicate kilobytes into every
+later replay. The snapshot exposes `outputFile` instead, for a host that
+wants the whole thing.
+
+Two honest limits. There is **no tree**: no task envelope names its parent
+task, so a nested agent is indistinguishable from a top-level one and the
+list is flat. And a marker set of `started` with no `completed` is a real,
+common outcome, not a rendering bug — `Agent` backgrounds by default and the
+CLI does not outlive the turn, so an async sub-agent dies unreported. That
+now shows up as `active > 0` at the end of a turn instead of as silence.
 
 ### Enforcement is belt-and-suspenders
 
@@ -435,6 +474,7 @@ fires, and the turn looks truncated. This was the root cause behind every
 | 0.4.9   | `utilization` on `claude-rate-limit` (percentage of the binding window)                                                                                                                               |
 | 0.4.10  | `usage.totalTokens` = last cycle's prompt, not the summed cycles (fixes inflated context gauges and premature auto-compaction); billing reads `modelUsage`, so sub-agent spend is no longer invisible |
 | 0.4.12  | `--effort` maps 1:1 for every model; the opus up-shift (`high`→`max`) is gone, so a host asking for `high` gets `high`                                                                                |
+| 0.4.13  | Sub-agent lifecycle surfaced: `task_started`/`task_notification` as markers, `task_progress` on the `claude-subagents` status key                                                                     |
 
 ## Testing
 

@@ -106,6 +106,69 @@ export interface ClaudeSystemMessage {
   tools?: unknown[];
 }
 
+/**
+ * Sub-agent lifecycle, emitted by the CLI as `system` envelopes.
+ *
+ * These arrive at TOP level — `parent_tool_use_id` is null — even for agents
+ * nested several deep, verified on claude 2.1.231 at spawn depth 2. That is
+ * what makes them usable: the sub-agents' own `assistant` envelopes are
+ * tagged with `parent_tool_use_id` and stay internal to the CLI, but their
+ * lifecycle is published here in the open.
+ *
+ * `description` means two different things by subtype. On `task_started` it
+ * names the task; on `task_progress` it is the step running right now
+ * ("Running …"). `src/task-tracker.ts` keeps them apart.
+ */
+export interface ClaudeTaskEvent {
+  type: "system";
+  subtype:
+    | "task_started"
+    | "task_progress"
+    | "task_updated"
+    | "task_notification"
+    | string;
+  task_id?: string;
+  tool_use_id?: string;
+  description?: string;
+  subagent_type?: string;
+  task_type?: string;
+  /** Terminal status on `task_notification`. */
+  status?: string;
+  /** Where the CLI wrote the sub-agent's full report. */
+  output_file?: string;
+  /** Partial state change on `task_updated`. */
+  patch?: { status?: string; end_time?: number };
+  last_tool_name?: string;
+  usage?: {
+    total_tokens?: number;
+    tool_uses?: number;
+    duration_ms?: number;
+  };
+}
+
+/** One sub-agent's state, as the host sees it. */
+export interface TaskSnapshot {
+  taskId: string;
+  /** Names the task. Set at `task_started`, never overwritten by a step. */
+  description: string;
+  subagentType?: string;
+  status: string;
+  /** The step running right now, cleared when the task ends. */
+  currentStep?: string;
+  lastToolName?: string;
+  toolUses?: number;
+  totalTokens?: number;
+  durationMs?: number;
+  outputFile?: string;
+}
+
+/** Every sub-agent seen this episode, in launch order. */
+export interface TaskTrackerState {
+  tasks: TaskSnapshot[];
+  active: number;
+  completed: number;
+}
+
 export interface ClaudeControlRequest {
   type: "control_request";
   request_id: string;
@@ -120,6 +183,7 @@ export type NdjsonMessage =
   | ClaudeStreamEventMessage
   | ClaudeResultMessage
   | ClaudeSystemMessage
+  | ClaudeTaskEvent
   | ClaudeControlRequest
   | ClaudeAssistantEnvelope
   | ClaudeUserEnvelope

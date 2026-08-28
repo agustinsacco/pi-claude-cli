@@ -17,6 +17,7 @@ import {
 import { getCustomToolDefs, writeMcpConfig } from "./src/mcp-config.js";
 import { rewriteOverflowMessage } from "./src/overflow.js";
 import { buildRateLimitPayload, rateLimitIdentity } from "./src/rate-limit.js";
+import type { TaskTrackerState } from "./src/types.js";
 
 // Kill all active Claude subprocesses on process exit to prevent orphans
 process.on("exit", killAllProcesses);
@@ -53,6 +54,33 @@ function publishRateLimit(info: Record<string, unknown>): void {
       RATE_LIMIT_STATUS_KEY,
       JSON.stringify(payload),
     );
+  } catch {
+    /* never break a turn over a status push */
+  }
+}
+
+/**
+ * Live sub-agent state, on its own status key.
+ *
+ * Same reasoning as the rate-limit channel: this is state ABOUT the turn, not
+ * content OF it. `task_progress` fires once per sub-agent tool call (roughly
+ * 700 times in the incident that motivated #23), so folding it into the
+ * transcript would bury the turn and cost context on every later replay. The
+ * durable half — one marker when a sub-agent starts, one when it finishes —
+ * goes in the turn instead, and needs no host change to render.
+ */
+const SUBAGENTS_STATUS_KEY = "claude-subagents";
+/** Last payload pushed, so an unchanged snapshot does not rewrite the status. */
+let lastSubagentsJson: string | undefined;
+
+function publishTaskProgress(state: TaskTrackerState): void {
+  const setStatus = uiContext?.ui?.setStatus;
+  if (typeof setStatus !== "function") return;
+  const json = JSON.stringify(state);
+  if (json === lastSubagentsJson) return;
+  lastSubagentsJson = json;
+  try {
+    setStatus.call(uiContext!.ui, SUBAGENTS_STATUS_KEY, json);
   } catch {
     /* never break a turn over a status push */
   }
@@ -130,6 +158,7 @@ export default function (pi: ExtensionAPI) {
     pi.on("session_start", async (_event: unknown, ctx: unknown) => {
       uiContext = ctx as typeof uiContext;
       lastRateLimitJson = undefined;
+      lastSubagentsJson = undefined;
       const allTools = pi.getAllTools();
       if (Array.isArray(allTools)) {
         pi.setActiveTools(allTools.map((t: any) => t.name));
@@ -146,6 +175,7 @@ export default function (pi: ExtensionAPI) {
         ...options,
         mcpConfigPath: configPath,
         onRateLimit: publishRateLimit,
+        onTaskProgress: publishTaskProgress,
       });
     };
 
