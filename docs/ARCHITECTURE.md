@@ -293,12 +293,68 @@ tool's own result, and repeating it would duplicate kilobytes into every
 later replay. The snapshot exposes `outputFile` instead, for a host that
 wants the whole thing.
 
-Two honest limits. There is **no tree**: no task envelope names its parent
-task, so a nested agent is indistinguishable from a top-level one and the
-list is flat. And a marker set of `started` with no `completed` is a real,
-common outcome, not a rendering bug — `Agent` backgrounds by default and the
-CLI does not outlive the turn, so an async sub-agent dies unreported. That
-now shows up as `active > 0` at the end of a turn instead of as silence.
+One honest limit remains. There is **no tree**: no task envelope names its
+parent task, so a nested agent is indistinguishable from a top-level one and
+the list is flat.
+
+Two envelopes on this channel are **not** sub-agents, and both used to be
+reported as ones:
+
+- `task_started` carries `task_type`. The CLI auto-backgrounds a slow `Bash`
+  into a `local_bash` task wearing the tool's own description, so a
+  three-agent fan-out grew a fourth "agent" called `Search for local source
+checkout of pi-claude-cli`. Only `local_agent` and `remote_agent` count. A
+  missing `task_type` still counts, so an older CLI does not go silent.
+- `task_notification` carries only `task_id` — no description, no
+  `task_type`. A task started in an earlier episode notifies into a later
+  one, and inventing a placeholder from the id emitted
+  `{"status":"stopped","description":"a8de7d982d824b56a"}`. An id this
+  episode never saw start is dropped.
+
+Markers carry `task_id`, so a host can join `started` to `completed` rather
+than matching on description. The description is clipped to 120 characters
+before the whole-payload cap, because one long description used to eat the
+preview and take `subagent_type` with it.
+
+### The turn ends when the sub-agents do (0.4.14)
+
+`Agent` backgrounds by default. The CLI answers such a call in milliseconds
+with "Async agent launched successfully… you will be notified when it
+completes", so the model ends its turn to wait — correctly, per its own tool
+contract. The CLI then emits `result` for that turn **while the agents are
+still running**, and this provider killed the subprocess on it.
+
+Every background fan-out was therefore a dead end. Captured 2026-08-28 in a
+real session: three agents launched, the model wrote "Now waiting on the
+three investigation agents", and all three transcripts stop mid-tool-call
+within three seconds of each other. The next turn replayed
+`task_notification status:"stopped"` for all three — the host learned they
+had died, one turn late.
+
+Holding the process open past that first `result` showed the loop already
+belongs to the CLI: the agent finished at +25s, `task_notification` carried
+its report, and the CLI re-invoked the model unprompted, which answered with
+the findings and emitted a **second** `result`. Nothing was written to stdin
+to make that happen.
+
+So while `pendingAgents()` is non-zero, a `result` is a cycle boundary, not
+the end of the episode. `applyResult` per cycle stays correct because
+`modelUsage` is cumulative for the CLI session (verified across a two-result
+episode: cache-read 68,718 → 161,295), so the last one wins rather than
+summing.
+
+Three bounds, none of which can fail a turn that already produced content:
+
+| Bound         | Value                  | Reset by                          |
+| ------------- | ---------------------- | --------------------------------- |
+| inactivity    | 300s of no stdout      | any output, incl. `task_progress` |
+| wall clock    | 15 min from first wait | never                             |
+| continuations | 32 cycles              | never                             |
+
+Both expiries end the turn on what it already has. An error there would
+throw away the launch markers and the model's own words, which are real.
+`PI_CLAUDE_CLI_NO_AGENT_WAIT=1` restores the old teardown;
+`PI_CLAUDE_CLI_AGENT_WAIT_MS` moves the wall clock.
 
 ### Enforcement is belt-and-suspenders
 
@@ -462,19 +518,20 @@ fires, and the turn looks truncated. This was the root cause behind every
 
 ## Version history of behavioral fixes
 
-| Version | Change                                                                                                                                                                                                |
-| ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0.4.0   | Port to `@earendil-works` pi 0.84; api-registry registration; scoped release                                                                                                                          |
-| 0.4.1   | 2.x control protocol; cycle-aware bridge (ordering, cumulative usage, final-answer safety net); CLI-side tool markers; 300s timeout                                                                   |
-| 0.4.2   | Resume-miss → one full-replay retry (fixes forked sessions)                                                                                                                                           |
-| 0.4.3   | Overflow → `context_length_exceeded` rewrite (pi auto-compaction); hermetic mode                                                                                                                      |
-| 0.4.4   | Lazy thinking materialization (no empty blocks for encrypted thinking); explicit `contentIndex` per tracked block                                                                                     |
-| 0.4.5   | `rate_limit_event` → `claude-rate-limit` status key for front-ends                                                                                                                                    |
-| 0.4.6   | Resume delta anchors on the last **assistant** message — stops full-transcript replay on every tool iteration                                                                                         |
-| 0.4.9   | `utilization` on `claude-rate-limit` (percentage of the binding window)                                                                                                                               |
-| 0.4.10  | `usage.totalTokens` = last cycle's prompt, not the summed cycles (fixes inflated context gauges and premature auto-compaction); billing reads `modelUsage`, so sub-agent spend is no longer invisible |
-| 0.4.12  | `--effort` maps 1:1 for every model; the opus up-shift (`high`→`max`) is gone, so a host asking for `high` gets `high`                                                                                |
-| 0.4.13  | Sub-agent lifecycle surfaced: `task_started`/`task_notification` as markers, `task_progress` on the `claude-subagents` status key                                                                     |
+| Version | Change                                                                                                                                                                                                                |
+| ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0.4.0   | Port to `@earendil-works` pi 0.84; api-registry registration; scoped release                                                                                                                                          |
+| 0.4.1   | 2.x control protocol; cycle-aware bridge (ordering, cumulative usage, final-answer safety net); CLI-side tool markers; 300s timeout                                                                                   |
+| 0.4.2   | Resume-miss → one full-replay retry (fixes forked sessions)                                                                                                                                                           |
+| 0.4.3   | Overflow → `context_length_exceeded` rewrite (pi auto-compaction); hermetic mode                                                                                                                                      |
+| 0.4.4   | Lazy thinking materialization (no empty blocks for encrypted thinking); explicit `contentIndex` per tracked block                                                                                                     |
+| 0.4.5   | `rate_limit_event` → `claude-rate-limit` status key for front-ends                                                                                                                                                    |
+| 0.4.6   | Resume delta anchors on the last **assistant** message — stops full-transcript replay on every tool iteration                                                                                                         |
+| 0.4.9   | `utilization` on `claude-rate-limit` (percentage of the binding window)                                                                                                                                               |
+| 0.4.10  | `usage.totalTokens` = last cycle's prompt, not the summed cycles (fixes inflated context gauges and premature auto-compaction); billing reads `modelUsage`, so sub-agent spend is no longer invisible                 |
+| 0.4.12  | `--effort` maps 1:1 for every model; the opus up-shift (`high`→`max`) is gone, so a host asking for `high` gets `high`                                                                                                |
+| 0.4.13  | Sub-agent lifecycle surfaced: `task_started`/`task_notification` as markers, `task_progress` on the `claude-subagents` status key                                                                                     |
+| 0.4.14  | Background sub-agents run to completion and report back (a `result` with agents pending is a cycle, not the end); non-agent tasks and orphan notifications no longer reported as agents; `AskUserQuestion` disallowed |
 
 ## Testing
 

@@ -58,6 +58,16 @@ export function spawnClaude(
     modelId,
     "--permission-prompt-tool",
     "stdio",
+    // `AskUserQuestion` renders a picker in the CLI's own TUI, and `-p` has
+    // no TUI. The call therefore cannot be answered by anyone: it returns
+    // "The user did not answer the questions." after a full round trip, and
+    // the model reads that as a person who declined and falls back to asking
+    // in prose. Captured 2026-08-28 on claude-sonnet-5, which then wrote
+    // "happy to discuss in plain text instead". Take the tool away so the
+    // model asks in prose the first time — the host's UI shows prose, and
+    // the user can answer it.
+    "--disallowedTools",
+    "AskUserQuestion",
   ];
 
   // Hermetic mode: keep the user's Claude Code environment out of pi turns.
