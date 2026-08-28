@@ -543,3 +543,240 @@ describe("rate limit forwarding (account state, not turn content)", () => {
     ).toBeDefined();
   });
 });
+
+/**
+ * Sub-agents report back — the reason a fan-out used to be a dead end.
+ *
+ * The CLI answers a background `Agent` call immediately and the model ends
+ * its turn to wait for the notification it was promised. The CLI emits
+ * `result` for THAT turn while the agents are still working, and killing on
+ * it took the agents down mid-tool-call.
+ *
+ * Captured 2026-08-28 on claude 2.1.231: held open past the first `result`,
+ * the CLI finished the agent at +25s, re-invoked the model unprompted, and
+ * emitted a second `result` carrying the findings. These tests encode that
+ * shape — two results, one turn.
+ */
+describe("waiting for background sub-agents", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+    delete process.env.PI_CLAUDE_CLI_NO_AGENT_WAIT;
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    delete process.env.PI_CLAUDE_CLI_NO_AGENT_WAIT;
+  });
+
+  const line = (o: unknown) => JSON.stringify(o) + "\n";
+  const agentStarted = (id: string) =>
+    line({
+      type: "system",
+      subtype: "task_started",
+      task_id: id,
+      task_type: "local_agent",
+      tool_use_id: `toolu_${id}`,
+      description: `agent ${id}`,
+      subagent_type: "general-purpose",
+    });
+  const agentDone = (id: string, status = "completed") =>
+    line({
+      type: "system",
+      subtype: "task_notification",
+      task_id: id,
+      status,
+      summary: "the report",
+    });
+  const result = () =>
+    line({ type: "result", subtype: "success", result: "ok" });
+
+  async function start() {
+    streamViaCli(
+      model,
+      { messages: [{ role: "user", content: "go" }] },
+      {} as any,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    return (spawn as any).mock.results[0].value;
+  }
+  const doneEvent = () =>
+    MockAssistantMessageEventStream.mock.instances[0]._events.find(
+      (e: any) => e.type === "done",
+    );
+
+  it("does not kill the CLI on a result while an agent is still running", async () => {
+    const proc = await start();
+    proc.stdout.write(agentStarted("a1"));
+    await vi.advanceTimersByTimeAsync(0);
+    proc.stdout.write(result());
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The old behaviour: SIGKILL 500ms after the first result.
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(proc.kill).not.toHaveBeenCalled();
+    expect(doneEvent()).toBeUndefined();
+  });
+
+  it("ends the turn on the result that follows the last agent's report", async () => {
+    const proc = await start();
+    proc.stdout.write(agentStarted("a1"));
+    proc.stdout.write(agentStarted("a2"));
+    await vi.advanceTimersByTimeAsync(0);
+    proc.stdout.write(result());
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(doneEvent()).toBeUndefined();
+
+    // One agent reports; the other still holds the turn open.
+    proc.stdout.write(agentDone("a1"));
+    await vi.advanceTimersByTimeAsync(0);
+    proc.stdout.write(result());
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(doneEvent()).toBeUndefined();
+
+    // Both reported: the next result is the episode's.
+    proc.stdout.write(agentDone("a2"));
+    await vi.advanceTimersByTimeAsync(0);
+    proc.stdout.write(result());
+    await vi.advanceTimersByTimeAsync(0);
+    proc.stdout.end();
+    proc.emit("exit", 0);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(doneEvent()).toBeDefined();
+  });
+
+  it("keeps the continuation's content in the same pi turn", async () => {
+    const proc = await start();
+    proc.stdout.write(agentStarted("a1"));
+    await vi.advanceTimersByTimeAsync(0);
+    proc.stdout.write(
+      line({ type: "result", subtype: "success", result: "launched, waiting" }),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    proc.stdout.write(agentDone("a1"));
+    await vi.advanceTimersByTimeAsync(0);
+    proc.stdout.write(
+      line({
+        type: "result",
+        subtype: "success",
+        result: "the agent found the answer",
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    proc.stdout.end();
+    proc.emit("exit", 0);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const text = (doneEvent().message.content as any[])
+      .filter((c) => c.type === "text")
+      .map((c) => c.text)
+      .join("\n");
+    // Both cycles' answers, and the lifecycle either side of them.
+    expect(text).toContain("launched, waiting");
+    expect(text).toContain("the agent found the answer");
+    expect(text).toContain('"status":"started"');
+    expect(text).toContain('"status":"completed"');
+  });
+
+  it("does not wait for a task that is not a sub-agent", async () => {
+    const proc = await start();
+    // An auto-backgrounded Bash must not hold the turn open.
+    proc.stdout.write(
+      line({
+        type: "system",
+        subtype: "task_started",
+        task_id: "b1",
+        task_type: "local_bash",
+        description: "Search for local source checkout of pi-claude-cli",
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    proc.stdout.write(result());
+    await vi.advanceTimersByTimeAsync(600);
+    expect(proc.kill).toHaveBeenCalledWith("SIGKILL");
+  });
+
+  it("gives up at the wall-clock ceiling, keeping the turn's own content", async () => {
+    const proc = await start();
+    proc.stdout.write(agentStarted("a1"));
+    await vi.advanceTimersByTimeAsync(0);
+    proc.stdout.write(
+      line({ type: "result", subtype: "success", result: "launched, waiting" }),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(doneEvent()).toBeUndefined();
+
+    // The agent never reports. 15 minutes later the turn ends anyway, and
+    // what the model already said survives — an error here would discard it.
+    await vi.advanceTimersByTimeAsync(900_000 + 1000);
+    proc.stdout.end();
+    proc.emit("exit", 0);
+    await vi.advanceTimersByTimeAsync(0);
+    const done = doneEvent();
+    expect(done).toBeDefined();
+    const text = (done.message.content as any[])
+      .filter((c: any) => c.type === "text")
+      .map((c: any) => c.text)
+      .join("\n");
+    expect(text).toContain("launched, waiting");
+  });
+
+  it("an agent that stalls ends the turn, it does not fail it", async () => {
+    const proc = await start();
+    proc.stdout.write(agentStarted("a1"));
+    await vi.advanceTimersByTimeAsync(0);
+    proc.stdout.write(
+      line({ type: "result", subtype: "success", result: "launched, waiting" }),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The agent dies without notifying, so the CLI goes quiet. Silence is
+    // the inactivity timeout's kill signal — but the model already spoke and
+    // the result already landed, so converting that into
+    // "Claude CLI subprocess timed out" would report a failure for a turn
+    // that succeeded.
+    await vi.advanceTimersByTimeAsync(300_000 + 1000);
+    proc.stdout.end();
+    proc.emit("exit", 0);
+    await vi.advanceTimersByTimeAsync(0);
+
+    const done = doneEvent();
+    expect(done).toBeDefined();
+    const text = (done.message.content as any[])
+      .filter((c: any) => c.type === "text")
+      .map((c: any) => c.text)
+      .join("\n");
+    expect(text).toContain("launched, waiting");
+    // The turn reports what happened, not a subprocess timeout.
+    expect(text).not.toContain("timed out");
+    expect(text).not.toContain("Error:");
+  });
+
+  it("still ends immediately on an error result", async () => {
+    const proc = await start();
+    proc.stdout.write(agentStarted("a1"));
+    await vi.advanceTimersByTimeAsync(0);
+    proc.stdout.write(
+      line({
+        type: "result",
+        subtype: "error_during_execution",
+        is_error: true,
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(proc.kill).toHaveBeenCalledWith("SIGKILL");
+  });
+
+  it("PI_CLAUDE_CLI_NO_AGENT_WAIT=1 restores the old teardown", async () => {
+    process.env.PI_CLAUDE_CLI_NO_AGENT_WAIT = "1";
+    vi.resetModules();
+    const { streamViaCli: noWait } = await import("../src/provider");
+    noWait(model, { messages: [{ role: "user", content: "go" }] }, {} as any);
+    await vi.advanceTimersByTimeAsync(0);
+    const proc = (spawn as any).mock.results[0].value;
+    proc.stdout.write(agentStarted("a1"));
+    await vi.advanceTimersByTimeAsync(0);
+    proc.stdout.write(result());
+    await vi.advanceTimersByTimeAsync(600);
+    expect(proc.kill).toHaveBeenCalledWith("SIGKILL");
+  });
+});

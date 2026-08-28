@@ -30,6 +30,23 @@
  * What this deliberately does NOT do: build a tree. No task envelope names its
  * parent task, so a nested agent is indistinguishable from a top-level one
  * here. The list is flat, and honestly so.
+ *
+ * TWO THINGS THIS CHANNEL IS NOT. Both were shipped as sub-agents once, and
+ * both put rows in pidex that named work no agent ever did:
+ *
+ * - **Not every task is an agent.** `task_started` carries `task_type`, and
+ *   the CLI auto-backgrounds a slow `Bash` into a `local_bash` task with the
+ *   tool's own `description`. Captured 2026-08-28 on claude 2.1.231: a
+ *   sub-agent's internal `find` surfaced as `[Claude Code · Task
+ *   {"status":"started","description":"Search for local source checkout of
+ *   pi-claude-cli"}]` — a fourth "agent" in a three-agent fan-out. Only
+ *   `local_agent` and `remote_agent` are sub-agents.
+ * - **Not every notification belongs to this episode.** `task_notification`
+ *   carries no `description` and no `task_type` — only `task_id`. A task
+ *   started in an EARLIER turn notifies in a later one, and a tracker that
+ *   invents a placeholder from the id emits `{"status":"stopped",
+ *   "description":"a8de7d982d824b56a"}`. An id this tracker never saw start
+ *   is not this episode's business, so it is dropped.
  */
 
 import type {
@@ -38,8 +55,48 @@ import type {
   TaskTrackerState,
 } from "./types.js";
 
-/** Marker argument previews are truncated to keep one row on one line. */
-const ARGS_PREVIEW_LIMIT = 120;
+/**
+ * Marker argument previews are truncated to keep one row on one line.
+ *
+ * Raised from 120 when `task_id` joined the payload: at 120 the id pushed
+ * `subagent_type` off the end, so a fan-out stopped saying WHICH kind of
+ * agent it launched — the one fact the row exists to carry.
+ */
+export const ARGS_PREVIEW_LIMIT = 200;
+
+/**
+ * Per-field cap on the description, applied BEFORE the whole-payload cap.
+ *
+ * Ordering fields human-first is not enough on its own: one long description
+ * eats the entire preview and takes `subagent_type` and `task_id` with it,
+ * which is how a 300-character task name could cost a host the identity it
+ * needs to collapse the row. Clip the one unbounded field instead, so the
+ * small structural ones always survive.
+ */
+export const DESCRIPTION_PREVIEW_LIMIT = 120;
+
+function clipDescription(value: string): string {
+  return value.length > DESCRIPTION_PREVIEW_LIMIT
+    ? `${value.slice(0, DESCRIPTION_PREVIEW_LIMIT)}…`
+    : value;
+}
+
+/**
+ * `task_type` values that mean "a sub-agent". Everything else the CLI tracks
+ * as a task — `local_bash`, `local_shell`, `local_workflow`, `main_session` —
+ * is plumbing this channel must not report as an agent.
+ *
+ * An event with NO `task_type` is treated as an agent: older CLIs omit the
+ * field, and going silent on them would be a worse regression than the stray
+ * row this filter exists to remove.
+ */
+const AGENT_TASK_TYPES = new Set(["local_agent", "remote_agent"]);
+
+export function isAgentTaskType(taskType: unknown): boolean {
+  return taskType === undefined || taskType === null
+    ? true
+    : typeof taskType === "string" && AGENT_TASK_TYPES.has(taskType);
+}
 
 /**
  * Build a `[Claude Code · Task …]` marker.
@@ -73,24 +130,34 @@ export interface TaskTracker {
   apply(event: ClaudeTaskEvent): string | undefined;
   /** Current state of every sub-agent seen this episode. */
   snapshot(): TaskTrackerState;
+  /**
+   * Sub-agents that started this episode and have not reported yet.
+   *
+   * The provider waits on this before it tears the CLI down: the CLI emits
+   * its turn `result` the moment the model stops talking, which for a
+   * background fan-out is long before the agents finish.
+   */
+  pendingAgents(): number;
 }
 
 export function createTaskTracker(): TaskTracker {
   /** Insertion-ordered, so the snapshot reads in launch order. */
   const tasks = new Map<string, TaskSnapshot>();
 
-  function upsert(id: string, patch: Partial<TaskSnapshot>): TaskSnapshot {
+  /**
+   * Patch a task this tracker already knows. Returns undefined for an id it
+   * never saw start — a task from an earlier episode, or one filtered out as
+   * not-an-agent. Inventing a placeholder here is what named rows after raw
+   * task ids; see the header.
+   */
+  function patch(
+    id: string,
+    changes: Partial<TaskSnapshot>,
+  ): TaskSnapshot | undefined {
     const existing = tasks.get(id);
-    const next: TaskSnapshot = existing ?? {
-      taskId: id,
-      // A progress event can arrive before the start it belongs to if the CLI
-      // reorders; the id is a truthful placeholder until the start names it.
-      description: id,
-      status: "running",
-    };
-    Object.assign(next, patch);
-    tasks.set(id, next);
-    return next;
+    if (!existing) return undefined;
+    Object.assign(existing, changes);
+    return existing;
   }
 
   return {
@@ -100,20 +167,32 @@ export function createTaskTracker(): TaskTracker {
 
       switch (event.subtype) {
         case "task_started": {
-          const task = upsert(id, {
+          // Plumbing, not a sub-agent: an auto-backgrounded Bash arrives here
+          // wearing the tool's own description. See the header.
+          if (!isAgentTaskType(event.task_type)) return undefined;
+          const task: TaskSnapshot = {
+            taskId: id,
             description: event.description ?? id,
             subagentType: event.subagent_type,
+            taskType: event.task_type,
+            toolUseId: event.tool_use_id,
             status: "running",
-          });
+          };
+          tasks.set(id, task);
+          // `skip_transcript` suppresses the ROW, never the tracking: a
+          // hidden sub-agent still holds the turn open, and the provider
+          // reads `pendingAgents()` to decide when the turn may end.
+          if (event.skip_transcript === true) return undefined;
           return taskMarker({
             status: "started",
-            description: task.description,
+            description: clipDescription(task.description),
             subagent_type: task.subagentType,
+            task_id: task.taskId,
           });
         }
 
         case "task_progress": {
-          upsert(id, {
+          patch(id, {
             // `description` on a progress event is the CURRENT step ("Running
             // …"), not the task's own description. Keep them apart: the task
             // name was set at start and must not be overwritten by a step.
@@ -129,27 +208,33 @@ export function createTaskTracker(): TaskTracker {
 
         case "task_updated": {
           const status = event.patch?.status;
-          upsert(id, status ? { status } : {});
+          if (status) patch(id, { status });
           return undefined;
         }
 
         case "task_notification": {
-          const task = upsert(id, {
+          const task = patch(id, {
             status: event.status ?? "completed",
             outputFile: event.output_file,
+            summary: event.summary,
             toolUses: event.usage?.tool_uses ?? tasks.get(id)?.toolUses,
             totalTokens:
               event.usage?.total_tokens ?? tasks.get(id)?.totalTokens,
             durationMs: event.usage?.duration_ms ?? tasks.get(id)?.durationMs,
             currentStep: undefined,
           });
+          // Not ours: a task from an earlier episode, or one filtered out at
+          // start. A notification carries no description, so the only row
+          // this could produce would be named after a raw task id.
+          if (!task) return undefined;
           // The sub-agent's full report reaches the model as the Task tool's
           // own result. Repeating it here would duplicate kilobytes into the
           // transcript, so the marker carries the shape of the work, not its
           // output.
           return taskMarker({
             status: task.status,
-            description: task.description,
+            description: clipDescription(task.description),
+            task_id: task.taskId,
             tool_uses: task.toolUses,
             total_tokens: task.totalTokens,
             duration_ms: task.durationMs,
@@ -168,6 +253,14 @@ export function createTaskTracker(): TaskTracker {
         active: list.filter((t) => t.status === "running").length,
         completed: list.filter((t) => t.status !== "running").length,
       };
+    },
+
+    pendingAgents(): number {
+      let pending = 0;
+      for (const task of tasks.values()) {
+        if (task.status === "running") pending++;
+      }
+      return pending;
     },
   };
 }

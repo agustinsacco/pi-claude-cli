@@ -139,6 +139,14 @@ export interface ClaudeTaskEvent {
   /** Partial state change on `task_updated`. */
   patch?: { status?: string; end_time?: number };
   last_tool_name?: string;
+  /**
+   * The CLI's own "do not put this in a transcript" hint. Set on tasks it
+   * considers plumbing; honoured for markers, not for tracking, because a
+   * hidden sub-agent still holds the turn open.
+   */
+  skip_transcript?: boolean;
+  /** The sub-agent's report, on `task_notification`. Live state, not content. */
+  summary?: string;
   usage?: {
     total_tokens?: number;
     tool_uses?: number;
@@ -152,6 +160,14 @@ export interface TaskSnapshot {
   /** Names the task. Set at `task_started`, never overwritten by a step. */
   description: string;
   subagentType?: string;
+  /**
+   * The CLI's task kind — `local_agent` / `remote_agent` for a sub-agent.
+   * Undefined on a CLI too old to send it, which is read as "agent" so the
+   * tracker keeps working rather than going silent.
+   */
+  taskType?: string;
+  /** The `Agent` tool call that launched this task; the join key a host needs. */
+  toolUseId?: string;
   status: string;
   /** The step running right now, cleared when the task ends. */
   currentStep?: string;
@@ -160,6 +176,8 @@ export interface TaskSnapshot {
   totalTokens?: number;
   durationMs?: number;
   outputFile?: string;
+  /** The sub-agent's own report, once it finishes. */
+  summary?: string;
 }
 
 /** Every sub-agent seen this episode, in launch order. */

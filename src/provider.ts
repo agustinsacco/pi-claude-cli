@@ -62,6 +62,49 @@ const INACTIVITY_TIMEOUT_MS =
     ? Number(process.env.PI_CLAUDE_CLI_TIMEOUT_MS)
     : 300_000;
 
+/**
+ * BACKGROUND SUB-AGENTS REPORT BACK, AND THIS IS WHY THEY DIDN'T.
+ *
+ * The CLI answers a background `Agent` call in milliseconds with "Async agent
+ * launched successfully… you will be notified when it completes", and the
+ * model — correctly, per its own tool contract — ends its turn to wait. The
+ * CLI then emits `result` for that turn WHILE the agents keep running.
+ * Killing on that first result is what made every fan-out a dead end: the
+ * agents died mid-tool-call, their reports were never written, and the turn
+ * closed on "Now waiting on the three investigation agents".
+ *
+ * The loop the host was assumed to owe the CLI turned out to be the CLI's
+ * own. Captured 2026-08-28 on claude 2.1.231, holding the process open past
+ * `result`: the sub-agent finished at +25s, `task_notification` carried its
+ * report, the CLI re-invoked the model unprompted, and it answered with the
+ * findings and emitted a SECOND `result`. Nothing was written to stdin to
+ * make that happen.
+ *
+ * So the fix is to stop killing: while `pendingAgents()` is non-zero, a
+ * `result` is a cycle boundary, not the end of the episode. Two bounds keep a
+ * runaway fan-out from holding a turn open forever — the inactivity timer
+ * (which `task_progress` keeps resetting for as long as agents do real work)
+ * and the wall clock below.
+ *
+ * `applyResult` is safe to call per cycle: the CLI's `modelUsage` is
+ * cumulative for the session, verified across a two-result episode
+ * (cache-read 68,718 → 161,295), so the last one wins rather than summing.
+ */
+const WAIT_FOR_AGENTS = process.env.PI_CLAUDE_CLI_NO_AGENT_WAIT !== "1";
+
+/** Hard ceiling on holding a turn open for sub-agents. */
+const AGENT_WAIT_TIMEOUT_MS =
+  Number(process.env.PI_CLAUDE_CLI_AGENT_WAIT_MS) > 0
+    ? Number(process.env.PI_CLAUDE_CLI_AGENT_WAIT_MS)
+    : 900_000;
+
+/**
+ * Backstop on continuation cycles. Each completing agent costs one, and an
+ * agent may launch more; this only exists so a pathological loop cannot spin
+ * without end.
+ */
+const MAX_AGENT_CONTINUATIONS = 32;
+
 /** Extended stream options: pi's SimpleStreamOptions plus optional cwd and mcpConfigPath */
 type StreamViaCLiOptions = SimpleStreamOptions & {
   cwd?: string;
@@ -240,9 +283,41 @@ export function streamViaCli(
       // Inactivity timeout: kill subprocess if no stdout for INACTIVITY_TIMEOUT_MS
       let inactivityTimer: ReturnType<typeof setTimeout> | undefined;
 
+      // Sub-agent wait state (see WAIT_FOR_AGENTS): how many `result`
+      // envelopes have been treated as cycle boundaries, and the wall-clock
+      // backstop that stops waiting no matter what the agents are doing.
+      let agentContinuations = 0;
+      let agentWaitTimer: ReturnType<typeof setTimeout> | undefined;
+      let agentWaitExpired = false;
+      let waitingForAgents = false;
+
+      /**
+       * End the episode on what it already has: kill the CLI and close the
+       * reader without pushing an error.
+       *
+       * Only correct once a `result` has been seen. Before that, silence means
+       * a wedged CLI and the turn has nothing — which is what the inactivity
+       * timeout's error is for.
+       */
+      function endTurnOnPartialWork() {
+        agentWaitExpired = true;
+        clearTimeout(inactivityTimer);
+        clearTimeout(agentWaitTimer);
+        cleanupProcess(proc!);
+        rl.close();
+      }
+
       function resetInactivityTimer() {
         if (inactivityTimer !== undefined) clearTimeout(inactivityTimer);
         inactivityTimer = setTimeout(() => {
+          // Waiting on sub-agents is the one state where silence is not a
+          // failed turn: the model already spoke and the result already
+          // landed. An agent that dies without notifying must not convert
+          // that into an error and throw the content away.
+          if (waitingForAgents) {
+            endTurnOnPartialWork();
+            return;
+          }
           forceKillProcess(proc!);
           endStreamWithError(
             `Claude CLI subprocess timed out: no output for ${INACTIVITY_TIMEOUT_MS / 1000} seconds`,
@@ -289,6 +364,7 @@ export function streamViaCli(
       // Handle subprocess close -- surface crashes with stderr and exit code
       proc.on("close", (code: number | null, _signal: string | null) => {
         clearTimeout(inactivityTimer);
+        clearTimeout(agentWaitTimer);
         if (broken) return; // resume-miss retry owns the stream
         if (code !== 0 && code !== null) {
           const stderr = getStderr();
@@ -424,8 +500,39 @@ export function streamViaCli(
             // handoff toolCall) is already accumulated; usage still applies.
             bridge.applyResult(r);
           }
+
+          // Sub-agents still working: this result ends a CYCLE, not the
+          // episode. Leave the CLI alive and keep reading — it re-invokes the
+          // model itself once they report, and emits another result. See
+          // WAIT_FOR_AGENTS for the capture this is built on.
+          if (
+            WAIT_FOR_AGENTS &&
+            !isError &&
+            !selfInterrupted &&
+            !aborted &&
+            !agentWaitExpired &&
+            agentContinuations < MAX_AGENT_CONTINUATIONS &&
+            taskTracker.pendingAgents() > 0
+          ) {
+            agentContinuations++;
+            waitingForAgents = true;
+            if (agentWaitTimer === undefined) {
+              agentWaitTimer = setTimeout(() => {
+                // Give up waiting, but let the turn end on its own content:
+                // the launch markers and whatever the model already said are
+                // real, and an error here would throw them away.
+                endTurnOnPartialWork();
+              }, AGENT_WAIT_TIMEOUT_MS);
+              // A pending wait must never hold the host process open.
+              agentWaitTimer.unref?.();
+            }
+            resetInactivityTimer();
+            return;
+          }
+
           // For success, handoff and error alike: clean up the subprocess
           clearTimeout(inactivityTimer);
+          clearTimeout(agentWaitTimer);
           cleanupProcess(proc!);
           rl.close();
         }
