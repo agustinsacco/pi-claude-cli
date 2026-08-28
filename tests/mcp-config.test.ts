@@ -270,3 +270,28 @@ describe("writeMcpConfig", () => {
     expect(result).toMatch(/\.json$/);
   });
 });
+
+describe("natively bridged tools", () => {
+  it("excludes ask_user from the custom-tools schema server", () => {
+    // ask_user is reached through the CLI's native AskUserQuestion (see
+    // tool-mapping.ts); advertising it via MCP too would offer the model
+    // two near-identical question tools.
+    const mockPi = {
+      getAllTools: vi.fn(() => [
+        {
+          name: "ask_user",
+          description: "Ask the user",
+          parameters: { type: "object" },
+        },
+        {
+          name: "deploy",
+          description: "Deploy",
+          parameters: { type: "object" },
+        },
+      ]),
+    };
+
+    const defs = getCustomToolDefs(mockPi);
+    expect(defs.map((d) => d.name)).toEqual(["deploy"]);
+  });
+});

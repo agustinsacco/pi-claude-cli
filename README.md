@@ -54,6 +54,11 @@ Requires the `claude` binary on your login-shell PATH (`npm install -g @anthropi
 - Background sub-agents get to finish: a `result` while agents are still
   running ends a cycle, not the turn, so their reports reach the model
   instead of dying with the subprocess
+- AskUserQuestion works when the host can answer it: if the pi session has
+  an `ask_user` tool (e.g. a host extension that renders real dialogs), the
+  CLI's native question tool is bridged onto it — denied CLI-side, handed to
+  pi, answers fed back next episode. Without such a tool it stays disallowed
+  so the model asks in prose instead of hearing "the user did not answer"
 - Configurable thinking effort across the full ladder (low to max), mapped 1:1 for every model: the level the host asks for is the level the CLI gets
 - Cross-platform subprocess management (Windows, macOS, Linux)
 - Inactivity timeout and process registry for cleanup

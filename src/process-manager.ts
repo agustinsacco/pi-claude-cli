@@ -44,6 +44,12 @@ export function spawnClaude(
     resumeSessionId?: string;
     newSessionId?: string;
     systemPromptMode?: SystemPromptMode;
+    /**
+     * Keep AskUserQuestion available because pi has an `ask_user` tool to
+     * bridge it onto (deny + handoff, like custom tools). Without a bridge
+     * the tool stays disallowed — see the comment on the flag below.
+     */
+    bridgeAskUserQuestion?: boolean;
   },
 ): ChildProcess {
   const args = [
@@ -58,17 +64,21 @@ export function spawnClaude(
     modelId,
     "--permission-prompt-tool",
     "stdio",
-    // `AskUserQuestion` renders a picker in the CLI's own TUI, and `-p` has
-    // no TUI. The call therefore cannot be answered by anyone: it returns
-    // "The user did not answer the questions." after a full round trip, and
-    // the model reads that as a person who declined and falls back to asking
-    // in prose. Captured 2026-08-28 on claude-sonnet-5, which then wrote
-    // "happy to discuss in plain text instead". Take the tool away so the
-    // model asks in prose the first time — the host's UI shows prose, and
-    // the user can answer it.
-    "--disallowedTools",
-    "AskUserQuestion",
   ];
+
+  // `AskUserQuestion` renders a picker in the CLI's own TUI, and `-p` has
+  // no TUI. Unbridged, the call cannot be answered by anyone: it returns
+  // "The user did not answer the questions." after a full round trip, and
+  // the model reads that as a person who declined and falls back to asking
+  // in prose. Captured 2026-08-28 on claude-sonnet-5, which then wrote
+  // "happy to discuss in plain text instead". When the pi session has an
+  // `ask_user` tool (a host extension that renders real dialogs), the call
+  // is bridged instead: denied CLI-side and handed to pi, answers fed back
+  // next episode. Otherwise take the tool away so the model asks in prose
+  // the first time — the host's UI shows prose, and the user can answer it.
+  if (!options?.bridgeAskUserQuestion) {
+    args.push("--disallowedTools", "AskUserQuestion");
+  }
 
   // Hermetic mode: keep the user's Claude Code environment out of pi turns.
   // --strict-mcp-config loads ONLY the servers from --mcp-config (our

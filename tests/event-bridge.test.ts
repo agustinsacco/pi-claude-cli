@@ -349,6 +349,24 @@ describe("createEventBridge", () => {
   // schema server) stream as pi toolCalls. Built-ins run natively in the CLI
   // and surface as markers — see the marker and filtering suites.
   describe("tool_use content block streaming (handoff tools)", () => {
+    it("emits a pi toolCall named ask_user for a top-level AskUserQuestion", () => {
+      const bridge = createBridgeWithStart();
+      bridge.handleEvent({
+        type: "content_block_start",
+        index: 0,
+        content_block: {
+          type: "tool_use",
+          id: "toolu_ask01",
+          name: "AskUserQuestion",
+        },
+      });
+
+      expect(stream.push).toHaveBeenCalledTimes(1);
+      const event = stream.events[0] as any;
+      expect(event.type).toBe("toolcall_start");
+      expect(event.partial.content[0].name).toBe("ask_user");
+    });
+
     it("pushes toolcall_start with mapped pi name on content_block_start", () => {
       const bridge = createBridgeWithStart();
       bridge.handleEvent({

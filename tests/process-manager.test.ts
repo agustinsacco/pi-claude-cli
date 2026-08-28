@@ -740,3 +740,19 @@ describe("hermetic mode (issue #5)", () => {
     expect(args).not.toContain("--strict-mcp-config");
   });
 });
+
+describe("AskUserQuestion bridging flag", () => {
+  it("disallows AskUserQuestion by default (no pi ask_user tool to bridge to)", () => {
+    spawnClaude("claude-sonnet-4-5-20250929");
+    const [, args] = (spawn as any).mock.calls.at(-1);
+    expect(args[args.indexOf("--disallowedTools") + 1]).toBe("AskUserQuestion");
+  });
+
+  it("keeps AskUserQuestion available when bridging is enabled", () => {
+    spawnClaude("claude-sonnet-4-5-20250929", undefined, {
+      bridgeAskUserQuestion: true,
+    });
+    const [, args] = (spawn as any).mock.calls.at(-1);
+    expect(args).not.toContain("--disallowedTools");
+  });
+});

@@ -179,9 +179,25 @@ export default function (pi: ExtensionAPI) {
       options?: Parameters<typeof streamViaCli>[2],
     ) => {
       const configPath = ensureMcpConfig(pi);
+      // AskUserQuestion stays enabled only when this pi session can actually
+      // answer it: an `ask_user` tool (host extension rendering real dialogs)
+      // to hand the questions off to. Checked per turn, not cached — tools
+      // can be registered after startup. Absent the tool (plain pi, registry
+      // not ready), the CLI flag disallows AskUserQuestion and the model
+      // asks in prose.
+      let bridgeAskUserQuestion = false;
+      try {
+        const allTools = pi.getAllTools();
+        bridgeAskUserQuestion =
+          Array.isArray(allTools) &&
+          allTools.some((t: any) => t?.name === "ask_user");
+      } catch {
+        /* registry unavailable — leave the tool disallowed */
+      }
       return streamViaCli(model, context, {
         ...options,
         mcpConfigPath: configPath,
+        bridgeAskUserQuestion,
         onRateLimit: publishRateLimit,
         onTaskProgress: publishTaskProgress,
       });

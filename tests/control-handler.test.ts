@@ -4,6 +4,7 @@ import type { ClaudeControlRequest } from "../src/types";
 import {
   handleControlRequest,
   TOOL_EXECUTION_DENIED_MESSAGE,
+  ASK_USER_HANDOFF_MESSAGE,
   MCP_PREFIX,
 } from "../src/control-handler";
 
@@ -188,5 +189,32 @@ describe("control-handler", () => {
       expect(result).toBe(false);
       spy.mockRestore();
     });
+  });
+});
+
+describe("AskUserQuestion handoff", () => {
+  it("denies AskUserQuestion and returns false, so it hands off to pi", () => {
+    const { stream, chunks } = createMockStdin();
+    const msg = makeControlRequest("AskUserQuestion", "req-ask-1", {
+      questions: [{ question: "Which path?", options: [] }],
+    });
+
+    const result = handleControlRequest(msg, stream);
+
+    expect(result).toBe(false);
+    const response = JSON.parse(chunks[0].trim());
+    expect(response.response.response.behavior).toBe("deny");
+    expect(response.response.response.message).toBe(ASK_USER_HANDOFF_MESSAGE);
+  });
+
+  it("keeps allowing other native tools untouched", () => {
+    const { stream, chunks } = createMockStdin();
+    const msg = makeControlRequest("WebSearch", "req-ws-1", { query: "x" });
+
+    const result = handleControlRequest(msg, stream);
+
+    expect(result).toBe(true);
+    const response = JSON.parse(chunks[0].trim());
+    expect(response.response.response.behavior).toBe("allow");
   });
 });

@@ -35,6 +35,24 @@ export const TOOL_MAPPINGS: ToolMapping[] = [
 /** Prefix for custom pi tools exposed via MCP. */
 export const CUSTOM_TOOLS_MCP_PREFIX = "mcp__custom-tools__";
 
+/**
+ * The CLI's native ask-the-user tool, and the pi tool it hands off to.
+ *
+ * AskUserQuestion is answered through the harness's permission callback
+ * (`can_use_tool` + `updatedInput.answers`), which under `-p` nobody renders —
+ * so it is bridged like a custom tool instead: denied CLI-side, handed to
+ * pi as an `ask_user` toolCall (a host extension shows the dialogs), answers
+ * fed back next episode as the tool result. Deliberately NOT in TOOL_MAPPINGS:
+ * ask_user must stay "custom" (isCustomToolName true) so the handoff-result
+ * prompt paths — buildCustomToolResultPrompt and the `TOOL RESULT (ask_user):`
+ * label in buildResumePrompt — keep firing for it.
+ *
+ * The argument shape (`questions: [{question, header, options, multiSelect}]`)
+ * passes through unchanged; the pi tool mirrors the CLI schema by contract.
+ */
+export const ASK_USER_QUESTION_CLAUDE = "AskUserQuestion";
+export const ASK_USER_PI = "ask_user";
+
 /** Set of built-in pi tool names derived from TOOL_MAPPINGS for O(1) lookup. */
 const BUILT_IN_PI_NAMES = new Set(TOOL_MAPPINGS.map((m) => m.pi));
 
@@ -63,7 +81,10 @@ export function isPiKnownClaudeTool(claudeName: string): boolean {
  * toolCall blocks — see docs/SPEC-observer-mode.md.
  */
 export function isHandoffClaudeTool(claudeName: string): boolean {
-  return claudeName.startsWith(CUSTOM_TOOLS_MCP_PREFIX);
+  return (
+    claudeName.startsWith(CUSTOM_TOOLS_MCP_PREFIX) ||
+    claudeName === ASK_USER_QUESTION_CLAUDE
+  );
 }
 
 // Derived lookup maps
@@ -103,6 +124,10 @@ export function mapClaudeToolNameToPi(claudeName: string): string {
   // Strip custom-tools MCP prefix first (e.g., "mcp__custom-tools__deploy" -> "deploy")
   if (claudeName.startsWith(CUSTOM_TOOLS_MCP_PREFIX)) {
     return claudeName.slice(CUSTOM_TOOLS_MCP_PREFIX.length);
+  }
+  // Native ask-the-user tool hands off to pi's ask_user (see the constant).
+  if (claudeName === ASK_USER_QUESTION_CLAUDE) {
+    return ASK_USER_PI;
   }
   // Standard built-in tool mapping (case-insensitive)
   return CLAUDE_TO_PI_NAME[claudeName.toLowerCase()] ?? claudeName;

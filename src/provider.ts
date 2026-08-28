@@ -109,6 +109,8 @@ const MAX_AGENT_CONTINUATIONS = 32;
 type StreamViaCLiOptions = SimpleStreamOptions & {
   cwd?: string;
   mcpConfigPath?: string;
+  /** pi has an ask_user tool, so AskUserQuestion stays enabled and bridges. */
+  bridgeAskUserQuestion?: boolean;
   /** Called with account rate-limit state as the CLI reports it. */
   onRateLimit?: (info: Record<string, unknown>) => void;
   /**
@@ -230,6 +232,7 @@ export function streamViaCli(
         resumeSessionId,
         newSessionId: newCliId,
         systemPromptMode,
+        bridgeAskUserQuestion: options?.bridgeAskUserQuestion,
       });
       // Record the mapping as soon as the session exists on disk. On a turn
       // that later errors, the mapping is cleared so the next turn reimports.

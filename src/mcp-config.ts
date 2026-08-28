@@ -20,6 +20,14 @@ const BUILT_IN_TOOL_NAMES = new Set([
   "find",
 ]);
 
+/**
+ * Tools reached through a native CLI tool instead of the custom-tools MCP
+ * server. `ask_user` bridges from the CLI's own AskUserQuestion (see
+ * tool-mapping.ts); advertising it here too would show the model two
+ * near-identical question tools.
+ */
+const NATIVELY_BRIDGED_TOOL_NAMES = new Set(["ask_user"]);
+
 /** A custom tool definition with MCP-compatible schema. */
 export interface McpToolDef {
   name: string;
@@ -41,7 +49,11 @@ export function getCustomToolDefs(pi: any): McpToolDef[] {
   }
 
   return allTools
-    .filter((tool: any) => !BUILT_IN_TOOL_NAMES.has(tool.name))
+    .filter(
+      (tool: any) =>
+        !BUILT_IN_TOOL_NAMES.has(tool.name) &&
+        !NATIVELY_BRIDGED_TOOL_NAMES.has(tool.name),
+    )
     .map((tool: any) => ({
       name: tool.name,
       description: tool.description,

@@ -9,10 +9,22 @@
  */
 
 import type { ClaudeControlRequest } from "./types";
-import { CUSTOM_TOOLS_MCP_PREFIX } from "./tool-mapping.js";
+import {
+  CUSTOM_TOOLS_MCP_PREFIX,
+  ASK_USER_QUESTION_CLAUDE,
+} from "./tool-mapping.js";
 
 export const TOOL_EXECUTION_DENIED_MESSAGE =
   "Tool execution is unavailable in this environment.";
+
+/**
+ * AskUserQuestion's deny message doubles as the tool_result the model reads
+ * in the CLI transcript on the next resume, so it must say what actually
+ * happens: the host is asking, and the answers arrive as the next message.
+ */
+export const ASK_USER_HANDOFF_MESSAGE =
+  "The host UI is presenting these questions to the user. " +
+  "Their answers will arrive in the next message; do not re-ask.";
 
 /** Prefix for MCP (Model Context Protocol) tool names. */
 export const MCP_PREFIX = "mcp__";
@@ -58,18 +70,31 @@ export function handleControlRequest(
 
   const toolName = msg.request?.tool_name ?? "";
   const isCustomTool = toolName.startsWith(CUSTOM_TOOLS_MCP_PREFIX);
+  // AskUserQuestion is a handoff too: allowing it would need
+  // `updatedInput.answers` filled by a UI this process does not have, and
+  // allowing it UNCHANGED makes the CLI answer the model with "The user did
+  // not answer the questions." — which models read as a human who declined.
+  // Deny it here; the provider hands the questions to pi as an `ask_user`
+  // toolCall and the real answers come back next episode.
+  const isAskUser = toolName === ASK_USER_QUESTION_CLAUDE;
+  const denied = isCustomTool || isAskUser;
 
   const response: ControlResponse = {
     type: "control_response",
     response: {
       subtype: "success",
       request_id: msg.request_id,
-      response: isCustomTool
-        ? { behavior: "deny", message: TOOL_EXECUTION_DENIED_MESSAGE }
+      response: denied
+        ? {
+            behavior: "deny",
+            message: isAskUser
+              ? ASK_USER_HANDOFF_MESSAGE
+              : TOOL_EXECUTION_DENIED_MESSAGE,
+          }
         : { behavior: "allow", updatedInput: msg.request?.input ?? {} },
     },
   };
 
   stdin.write(JSON.stringify(response) + "\n");
-  return !isCustomTool;
+  return !denied;
 }

@@ -2,11 +2,14 @@ import { describe, it, expect } from "vitest";
 import {
   TOOL_MAPPINGS,
   CUSTOM_TOOLS_MCP_PREFIX,
+  ASK_USER_QUESTION_CLAUDE,
+  ASK_USER_PI,
   mapClaudeToolNameToPi,
   mapPiToolNameToClaude,
   translateClaudeArgsToPi,
   translatePiArgsToClaude,
   isCustomToolName,
+  isHandoffClaudeTool,
 } from "../src/tool-mapping";
 
 describe("tool-mapping", () => {
@@ -248,5 +251,41 @@ describe("tool-mapping", () => {
       });
       expect(result).toEqual({ foo: 1, bar: "baz" });
     });
+  });
+});
+
+describe("AskUserQuestion bridge", () => {
+  it("maps AskUserQuestion to pi's ask_user", () => {
+    expect(mapClaudeToolNameToPi(ASK_USER_QUESTION_CLAUDE)).toBe(ASK_USER_PI);
+  });
+
+  it("treats AskUserQuestion as a handoff tool", () => {
+    expect(isHandoffClaudeTool(ASK_USER_QUESTION_CLAUDE)).toBe(true);
+  });
+
+  it("keeps ask_user a custom tool, so handoff-result prompt paths fire", () => {
+    // If ask_user ever lands in TOOL_MAPPINGS this flips to false and
+    // buildCustomToolResultPrompt stops presenting its answers directly.
+    expect(isCustomToolName(ASK_USER_PI)).toBe(true);
+  });
+
+  it("passes AskUserQuestion arguments through unchanged", () => {
+    const args = {
+      questions: [
+        {
+          question: "Which path?",
+          header: "Mode",
+          options: [{ label: "A" }, { label: "B" }],
+          multiSelect: false,
+        },
+      ],
+    };
+    expect(translateClaudeArgsToPi(ASK_USER_QUESTION_CLAUDE, args)).toEqual(
+      args,
+    );
+  });
+
+  it("does not map the reverse direction — pi ask_user history stays custom", () => {
+    expect(mapPiToolNameToClaude(ASK_USER_PI)).toBe(ASK_USER_PI);
   });
 });
