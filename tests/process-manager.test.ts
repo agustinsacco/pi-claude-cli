@@ -65,6 +65,9 @@ describe("spawnClaude", () => {
     expect(args).toContain("claude-sonnet-4-5-20250929");
     expect(args).toContain("--permission-prompt-tool");
     expect(args).toContain("stdio");
+    // No TUI under -p, so an AskUserQuestion call can only ever come back
+    // "The user did not answer the questions."
+    expect(args[args.indexOf("--disallowedTools") + 1]).toBe("AskUserQuestion");
   });
 
   it("passes stream-json for both input-format and output-format", () => {
