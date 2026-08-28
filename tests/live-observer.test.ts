@@ -148,6 +148,58 @@ describe.skipIf(!LIVE)("live observer mode (real CLI, real tokens)", () => {
       expect(raw).not.toContain("No response requested");
     },
   );
+  // #23: a fan-out used to be a blank pane. The sub-agents' own envelopes
+  // carry parent_tool_use_id and stay internal, so this asserts the ONE
+  // channel that escapes: top-level `system` task_* envelopes.
+  it(
+    "surfaces a sub-agent fan-out as markers plus live progress",
+    { timeout: 300_000 },
+    async () => {
+      const progress: any[] = [];
+      const done = await new Promise<any>((resolve, reject) => {
+        const s = streamViaCli(
+          model,
+          {
+            messages: [
+              {
+                role: "user",
+                content:
+                  "Launch exactly one sub-agent with the Task tool (subagent_type general-purpose, run_in_background false) that reads one.txt and reports its contents. Wait for it and do not read the file yourself.",
+              },
+            ],
+          },
+          {
+            cwd: ws,
+            onTaskProgress: (state: any) => progress.push(state),
+          } as any,
+        );
+        (async () => {
+          for await (const ev of s as any) {
+            if (ev.type === "done") return resolve(ev);
+            if (ev.type === "error") return reject(new Error(String(ev.error)));
+          }
+          reject(new Error("no done"));
+        })().catch(reject);
+      });
+
+      const markers = done.message.content
+        .filter((c: any) => c.type === "text")
+        .map((c: any) => c.text)
+        .filter((t: string) => t.startsWith("[Claude Code · Task"));
+
+      // One when it starts, one when it reports.
+      expect(markers.some((m: string) => m.includes('"started"'))).toBe(true);
+      expect(markers.some((m: string) => m.includes('"completed"'))).toBe(true);
+
+      // Live progress reached the host, and the fan-out closed.
+      expect(progress.length).toBeGreaterThan(0);
+      const last = progress[progress.length - 1];
+      expect(last.tasks.length).toBeGreaterThan(0);
+      expect(last.active).toBe(0);
+      expect(last.completed).toBeGreaterThan(0);
+      expect(last.tasks[0].toolUses).toBeGreaterThan(0);
+    },
+  );
 });
 
 describe.skipIf(!LIVE)("live handoff: custom pi tool round-trip", () => {

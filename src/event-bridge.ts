@@ -57,6 +57,13 @@ export interface EventBridge {
    */
   handleAssistantEnvelope(envelope: ClaudeAssistantEnvelope): void;
   /**
+   * Append a pre-built marker text block. Used for sub-agent lifecycle, whose
+   * events arrive as top-level `system` envelopes rather than content blocks
+   * (`src/task-tracker.ts`). The bridge stays the only writer of
+   * `output.content`.
+   */
+  appendMarker(text: string): void;
+  /**
    * The final `result` envelope: authoritative cumulative usage for the
    * whole episode, plus a safety net that appends the final answer text if
    * any stream pathology kept it out of the bridged content.
@@ -649,6 +656,7 @@ export function createEventBridge(
   return {
     handleEvent,
     handleAssistantEnvelope,
+    appendMarker: appendTextBlock,
     applyResult,
     getOutput: () => output,
   };
