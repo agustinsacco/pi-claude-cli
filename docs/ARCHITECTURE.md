@@ -155,6 +155,29 @@ Two caveats, both deliberate:
 - Older CLIs send no `modelUsage`. The bridge falls back to `result.usage`,
   and an empty object is treated as absent rather than as a zero bill.
 
+### Effort maps 1:1, and never upward (0.4.12)
+
+`--effort` used to be shifted up a rung for opus: `medium` became `high` and
+`high` became `max`. That compensated for a cap the CLI no longer has, and it
+made `high` unrequestable on opus at all.
+
+Re-verified 2026-08-27 on claude CLI 2.1.231 with `claude-opus-5`: `--effort
+high`, `--effort xhigh` and `--effort max` are each accepted and recorded
+distinctly in the session transcript's `effort` field. The cap is gone.
+
+The shift was not a private detail. Claude Code **skills size their own
+sub-agent fan-out from this flag** — `code-review` in 2.1.231 carries three
+tiers (`angleCount:8, cap:8`, `angleCount:8, cap:10`, `angleCount:10,
+cap:15`) — so a host asking for `high` on opus silently bought the widest one.
+A pidex turn on 2026-08-27 did exactly that: 14 nested agents, 743 API calls
+and 43.4M cache-read tokens in eight minutes, from a UI whose chip read
+"High".
+
+Every level now passes through unchanged. `minimal` still floors at `low`
+because the CLI has no rung below it; that is a floor, and the invariant the
+tests enforce is one-directional — **no level ever maps above what the host
+asked for**.
+
 ### Thinking blocks are materialized lazily (0.4.4)
 
 Most Claude models stream **encrypted** thinking: a multi-kilobyte
@@ -411,6 +434,7 @@ fires, and the turn looks truncated. This was the root cause behind every
 | 0.4.6   | Resume delta anchors on the last **assistant** message — stops full-transcript replay on every tool iteration                                                                                         |
 | 0.4.9   | `utilization` on `claude-rate-limit` (percentage of the binding window)                                                                                                                               |
 | 0.4.10  | `usage.totalTokens` = last cycle's prompt, not the summed cycles (fixes inflated context gauges and premature auto-compaction); billing reads `modelUsage`, so sub-agent spend is no longer invisible |
+| 0.4.12  | `--effort` maps 1:1 for every model; the opus up-shift (`high`→`max`) is gone, so a host asking for `high` gets `high`                                                                                |
 
 ## Testing
 

@@ -2,8 +2,8 @@
  * Thinking effort configuration for mapping pi's ThinkingLevel to Claude CLI --effort flags.
  *
  * Maps pi's reasoning levels (minimal/low/medium/high/xhigh/max) to the CLI's effort
- * levels (low/medium/high/xhigh/max). Opus models keep the elevated mapping where
- * medium becomes high and high becomes max; all other models pass through 1:1.
+ * levels (low/medium/high/xhigh/max). Every model passes through 1:1 apart from
+ * `minimal`, which the CLI has no rung for and which floors at `low`.
  *
  * IMPORTANT: The CLI does NOT support --thinking-budget. Only --effort is supported.
  */
@@ -14,12 +14,23 @@ import type { ThinkingLevel, ThinkingBudgets } from "@earendil-works/pi-ai";
 export type CliEffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
 
 /**
- * Standard model mapping: pi ThinkingLevel -> CLI effort.
- * The CLI accepts the full ladder (low/medium/high/xhigh/max) for current
- * models (verified with claude-fable-5 and claude-sonnet-5 on claude CLI
- * 2.x), so levels pass through 1:1 instead of capping at high.
+ * pi ThinkingLevel -> CLI effort, 1:1 for every rung the CLI has.
+ *
+ * The CLI accepts the full ladder (low/medium/high/xhigh/max) on every current
+ * model — verified with claude-fable-5 and claude-sonnet-5, and on 2026-08-27
+ * with claude-opus-5, where `--effort high`, `xhigh` and `max` were each
+ * accepted and recorded distinctly in the session transcript's `effort` field.
+ *
+ * Opus used to be shifted up a rung here (medium→high, high→max) to compensate
+ * for a cap that no longer exists. That made `high` unrequestable on opus and
+ * was not a private detail: Claude Code skills size their own sub-agent fan-out
+ * from this flag, so a host asking for `high` silently got the widest tier the
+ * skill offered. See https://github.com/agustinsacco/pi-claude-cli/issues/22.
+ *
+ * `minimal` has no CLI rung and floors at `low`. That is a floor, not a shift:
+ * it maps down, and no level maps above what the host asked for.
  */
-const STANDARD_EFFORT_MAP: Record<ThinkingLevel, CliEffortLevel> = {
+const EFFORT_MAP: Record<ThinkingLevel, CliEffortLevel> = {
   minimal: "low",
   low: "low",
   medium: "medium",
@@ -27,30 +38,6 @@ const STANDARD_EFFORT_MAP: Record<ThinkingLevel, CliEffortLevel> = {
   xhigh: "xhigh",
   max: "max",
 };
-
-/**
- * Opus model mapping: shifted up for elevated reasoning.
- * Opus models get max capability at high/xhigh/max levels.
- */
-const OPUS_EFFORT_MAP: Record<ThinkingLevel, CliEffortLevel> = {
-  minimal: "low",
-  low: "low",
-  medium: "high", // shifted: standard high
-  high: "max", // shifted: maximum capability
-  xhigh: "max", // Opus gets max
-  max: "max",
-};
-
-/**
- * Detect whether a model ID refers to an Opus model.
- * Uses includes('opus') for forward-compatibility with future Opus versions.
- *
- * @param modelId - The model identifier string
- * @returns true if the model is an Opus variant
- */
-export function isOpusModel(modelId: string): boolean {
-  return modelId.includes("opus");
-}
 
 /**
  * Map pi's ThinkingLevel to a CLI effort string.
@@ -61,13 +48,13 @@ export function isOpusModel(modelId: string): boolean {
  * not token budgets.
  *
  * @param reasoning - Pi's thinking level (undefined = omit flag)
- * @param modelId - Model ID for Opus detection
+ * @param _modelId - Unused; kept so callers need not change. Every model maps alike.
  * @param thinkingBudgets - Custom budgets (logged as unsupported, not applied)
  * @returns CLI effort level string, or undefined if flag should be omitted
  */
 export function mapThinkingEffort(
   reasoning?: ThinkingLevel,
-  modelId?: string,
+  _modelId?: string,
   thinkingBudgets?: ThinkingBudgets,
 ): CliEffortLevel | undefined {
   if (reasoning === undefined) {
@@ -81,7 +68,5 @@ export function mapThinkingEffort(
     );
   }
 
-  const isOpus = modelId ? isOpusModel(modelId) : false;
-  const map = isOpus ? OPUS_EFFORT_MAP : STANDARD_EFFORT_MAP;
-  return map[reasoning];
+  return EFFORT_MAP[reasoning];
 }
