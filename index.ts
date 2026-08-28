@@ -80,7 +80,15 @@ function publishTaskProgress(state: TaskTrackerState): void {
   if (json === lastSubagentsJson) return;
   lastSubagentsJson = json;
   try {
-    setStatus.call(uiContext!.ui, SUBAGENTS_STATUS_KEY, json);
+    // An empty snapshot means the episode is over: CLEAR the key rather than
+    // pushing `{"tasks":[],...}`. A host reads a present status as live
+    // state, so an empty one left standing is a strip that still claims
+    // agents when there are none.
+    setStatus.call(
+      uiContext!.ui,
+      SUBAGENTS_STATUS_KEY,
+      state.tasks.length === 0 ? undefined : json,
+    );
   } catch {
     /* never break a turn over a status push */
   }

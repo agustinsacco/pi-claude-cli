@@ -385,7 +385,14 @@ describe("sub-agent visibility (#23)", () => {
     expect(text).not.toContain("Reading b.txt");
 
     expect(seen.length).toBeGreaterThan(0);
-    const last = seen[seen.length - 1];
+    // The episode signs off with an EMPTY snapshot, which the host reads as
+    // "clear the channel" — live state must not outlive the turn it is about.
+    expect(seen[seen.length - 1]).toMatchObject({
+      tasks: [],
+      active: 0,
+      completed: 0,
+    });
+    const last = seen.filter((s) => s.tasks.length > 0).at(-1);
     expect(last).toMatchObject({ active: 0, completed: 2 });
     expect(last.tasks.map((t: any) => t.subagentType)).toEqual([
       "general-purpose",

@@ -602,6 +602,16 @@ export function streamViaCli(
       stream.end();
     } finally {
       cleanupSystemPromptFile();
+      // The sub-agent channel is state ABOUT a turn, so it must not outlive
+      // one. Left standing, the last snapshot pins whatever the agents were
+      // doing when the episode ended — a host then shows "running" for
+      // agents that finished, or for agents that died, until the next turn
+      // happens to publish something else.
+      try {
+        options?.onTaskProgress?.({ tasks: [], active: 0, completed: 0 });
+      } catch {
+        /* a status push must never break a turn */
+      }
     }
   })();
 
