@@ -65,11 +65,14 @@ Per turn, in order:
    pi's history → discard mapping, reimport.
 3. **Resume** (`--resume <cliId>`): send only the delta — messages after the
    last assistant turn (new user text; handoff tool results as labeled text).
-   No system prompt (the session already has it).
+   The system prompt IS re-sent: the CLI does not keep `--system-prompt`
+   across `--resume`, and a resumed session without it reverts to Claude
+   Code's default prompt. It is replayed verbatim from the sidecar rather
+   than rebuilt, because only byte-identical bytes keep the prefix cached.
 4. **Create/import** (no mapping, resume-miss, or stale): mint a fresh UUID,
    `--session-id <uuid>`, send the full flattened history (`buildPrompt`) with
-   the system prompt, store the mapping. Resume-miss retries once through this
-   path (existing driver, kept).
+   the system prompt, store the mapping and the prompt. Resume-miss retries
+   once through this path (existing driver, kept).
 
 Fork, model switch, copied machines — all collapse into "no valid mapping →
 reimport". One recovery path.
