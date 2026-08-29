@@ -49,6 +49,9 @@ import {
   getCliSession,
   setCliSession,
   clearCliSession,
+  getSystemPrompt,
+  setSystemPrompt,
+  clearSystemPrompt,
 } from "./session-map.js";
 import { randomUUID } from "node:crypto";
 /** Inactivity timeout: kill subprocess if no stdout for 180 seconds (3 minutes). */
@@ -178,6 +181,9 @@ export function streamViaCli(
     let selfInterrupted = false;
     // Set on pi-initiated abort so the turn ends quietly, not as an error.
     let aborted = false;
+    // CLI session this attempt staged its system prompt under, so the finally
+    // below can remove the right file. Set once the ids are resolved.
+    let promptFileKey: string | undefined;
 
     try {
       const cwd = options?.cwd ?? process.cwd();
@@ -198,6 +204,7 @@ export function streamViaCli(
       // Fresh sessions get a provider-minted id, never pi's: the CLI refuses
       // a --session-id it has already seen, and forks reuse pi ids.
       const newCliId = resumeSessionId ? undefined : randomUUID();
+      promptFileKey = resumeSessionId ?? newCliId;
 
       // Resume sends only the delta since the last assistant turn (new user
       // text, handoff tool results). Create/import sends the full history.
@@ -205,14 +212,19 @@ export function streamViaCli(
         ? buildResumePrompt(context)
         : buildPrompt(context);
       // Resolved per spawn rather than once at module load so a host can flip
-      // the setting between sessions without restarting pi. Only the
-      // session-creating turn carries a system prompt — the CLI keeps it for
-      // the life of the session — so switching mid-session takes effect on
-      // the next new session, not this one.
+      // the setting between sessions without restarting pi. Switching
+      // mid-session takes effect on the next NEW session, not this one: a
+      // resumed session replays the prompt it was created with (below).
       const systemPromptMode = resolveSystemPromptMode();
-      const systemPrompt = resumeSessionId
-        ? undefined
-        : buildSystemPrompt(context, cwd, systemPromptMode);
+      // The CLI does not keep --system-prompt across --resume, so it goes on
+      // EVERY spawn. On resume, replay the stored bytes rather than rebuilding
+      // them: an identical prompt keeps the cached prefix, a drifted one
+      // re-bills the whole transcript as cache write. See src/session-map.ts.
+      const storedSystemPrompt = resumeSessionId
+        ? getSystemPrompt(resumeSessionId)
+        : undefined;
+      const systemPrompt =
+        storedSystemPrompt ?? buildSystemPrompt(context, cwd, systemPromptMode);
 
       // Compute effort level from reasoning options
       const effort = mapThinkingEffort(
@@ -234,6 +246,9 @@ export function streamViaCli(
       // Record the mapping as soon as the session exists on disk. On a turn
       // that later errors, the mapping is cleared so the next turn reimports.
       if (piSessionId && newCliId) setCliSession(piSessionId, newCliId);
+      // Store the created prompt so every later turn re-passes these exact
+      // bytes. Without it, resume falls back to a rebuild that can drift.
+      if (newCliId && systemPrompt) setSystemPrompt(newCliId, systemPrompt);
       const getStderr = captureStderr(proc);
 
       // Register in global process registry for teardown cleanup
@@ -485,12 +500,17 @@ export function streamViaCli(
               // Recoverable: the sidecar pointed at a CLI session that no
               // longer exists. Clear it; the driver reimports once.
               if (piSessionId) clearCliSession(piSessionId);
+              clearSystemPrompt(resumeSessionId);
               resumeMiss = true;
               broken = true;
             } else {
               // A failed turn may leave the CLI session ending on a user
               // entry; resuming that would splice filler. Reimport next turn.
               if (piSessionId) clearCliSession(piSessionId);
+              // This CLI session will never be resumed, so its stored prompt
+              // is dead weight.
+              const deadCliId = resumeSessionId ?? newCliId;
+              if (deadCliId) clearSystemPrompt(deadCliId);
               endStreamWithError(errMsg);
             }
           }
@@ -581,6 +601,9 @@ export function streamViaCli(
       if (options?.signal && abortHandler) {
         options.signal.removeEventListener("abort", abortHandler);
       }
+      // Staged prompt file is per CLI session, so it is removed here where
+      // the ids are in scope — a resume-miss retry stages a second one.
+      cleanupSystemPromptFile(promptFileKey);
     }
   }
 
@@ -601,7 +624,6 @@ export function streamViaCli(
       } as any);
       stream.end();
     } finally {
-      cleanupSystemPromptFile();
       // The sub-agent channel is state ABOUT a turn, so it must not outlive
       // one. Left standing, the last snapshot pins whatever the agents were
       // doing when the episode ended — a host then shows "running" for

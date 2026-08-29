@@ -379,12 +379,17 @@ backstop (2s after an interrupt) and the post-result reaper.
 pi's session JSONL is the **only** authoritative record; the CLI session is
 the model's working memory. The sidecar map
 `~/.pi/agent/pi-claude-cli/session-map.json` (`PI_CLAUDE_CLI_STATE_DIR`
-overrides; `src/session-map.ts`) links pi session id → CLI session id.
+overrides; `src/session-map.ts`) links pi session id → CLI session id, and
+`sysprompt/<cliId>.txt` beside it holds the system prompt that session was
+created with.
 
 - **Resume:** mapping present and not stale → `--resume <cliId>` with a
-  **delta** prompt (only what follows the last assistant turn), no system
-  prompt. This is what makes token use native: measured 60 cache-write
-  tokens on a follow-up turn.
+  **delta** prompt (only what follows the last assistant turn), plus the
+  stored system prompt replayed verbatim. The prompt is NOT optional here:
+  the CLI drops `--system-prompt` on resume, so omitting it both loses pi's
+  instructions and re-bills the transcript as cache write (measured
+  2026-08-29: 9,761 write tokens without it, 112 with it). Verbatim rather
+  than rebuilt because `buildSystemPrompt` is not byte-stable across turns.
 - **Create/import:** no mapping, stale, resume miss, or failed prior turn →
   fresh provider-minted UUID under `--session-id`, full flattened history,
   system prompt attached, mapping recorded. Never pi's id — the CLI refuses

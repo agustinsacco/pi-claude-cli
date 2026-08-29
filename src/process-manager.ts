@@ -33,6 +33,15 @@ function isHermetic(): boolean {
   return value === "1" || value === "true" || value === "yes";
 }
 
+/**
+ * Where a spawn's system prompt is staged. Scoped to the CLI session so
+ * concurrent turns in one pi process cannot clobber each other.
+ */
+function systemPromptFilePath(sessionKey?: string): string {
+  const suffix = sessionKey ? `-${sessionKey}` : "";
+  return join(tmpdir(), `pi-claude-cli-sysprompt-${process.pid}${suffix}.txt`);
+}
+
 export function spawnClaude(
   modelId: string,
   systemPrompt?: string,
@@ -91,9 +100,13 @@ export function spawnClaude(
   if (systemPrompt) {
     // Write system prompt to a temp file to avoid ENAMETOOLONG on Windows.
     // Both flags accept a file path or literal text.
-    const tmpFile = join(
-      tmpdir(),
-      `pi-claude-cli-sysprompt-${process.pid}.txt`,
+    //
+    // Keyed by CLI session, not just pid: the prompt goes on every spawn
+    // (see provider.ts), and pi can run two turns of one process at once —
+    // its own sub-agents do. A shared per-pid path would let one turn
+    // overwrite the prompt another turn is about to read.
+    const tmpFile = systemPromptFilePath(
+      options?.resumeSessionId ?? options?.newSessionId,
     );
     writeFileSync(tmpFile, systemPrompt, "utf-8");
     // `pi` mode replaces Claude Code's prompt outright; `claude` mode layers
@@ -132,10 +145,13 @@ export function spawnClaude(
 /**
  * Clean up the temp system prompt file created by spawnClaude.
  * Safe to call multiple times or when no file exists.
+ *
+ * Pass the same CLI session key the spawn used; omitting it cleans the
+ * unscoped path, which is all a spawn without a session id creates.
  */
-export function cleanupSystemPromptFile(): void {
+export function cleanupSystemPromptFile(sessionKey?: string): void {
   try {
-    unlinkSync(join(tmpdir(), `pi-claude-cli-sysprompt-${process.pid}.txt`));
+    unlinkSync(systemPromptFilePath(sessionKey));
   } catch {
     // File doesn't exist or already deleted — ignore
   }

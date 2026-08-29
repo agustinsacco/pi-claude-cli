@@ -1855,10 +1855,14 @@ describe("streamViaCli", () => {
     beforeEach(() => {
       stateDir = fsx.mkdtempSync(pathx.join(os.tmpdir(), "pcc-state-"));
       process.env.PI_CLAUDE_CLI_STATE_DIR = stateDir;
+      // Pin the mode: which flag carries the prompt is asserted below, and an
+      // ambient PI_CLAUDE_CLI_SYSTEM_PROMPT would otherwise decide it.
+      process.env.PI_CLAUDE_CLI_SYSTEM_PROMPT = "claude";
     });
 
     afterEach(() => {
       delete process.env.PI_CLAUDE_CLI_STATE_DIR;
+      delete process.env.PI_CLAUDE_CLI_SYSTEM_PROMPT;
       try {
         fsx.rmSync(stateDir, { recursive: true, force: true });
       } catch {
@@ -1889,7 +1893,7 @@ describe("streamViaCli", () => {
       api: "pi-claude-cli",
     };
 
-    it("resumes the mapped CLI session with a delta prompt and no system prompt", async () => {
+    it("resumes the mapped CLI session with a delta prompt, and still sends the system prompt", async () => {
       writeMap({ "pi-sess-1": "cli-sess-9" });
       const context = {
         systemPrompt: "SYS",
@@ -1909,8 +1913,9 @@ describe("streamViaCli", () => {
       expect(args).toContain("--resume");
       expect(args[args.indexOf("--resume") + 1]).toBe("cli-sess-9");
       expect(args).not.toContain("--session-id");
-      expect(args).not.toContain("--append-system-prompt");
-      expect(args).not.toContain("--system-prompt");
+      // The CLI drops --system-prompt on resume, so it must be re-sent every
+      // turn or the session silently reverts to Claude Code's own prompt.
+      expect(args).toContain("--append-system-prompt");
 
       const proc = (spawn as any).mock.results[0].value;
       const sent = JSON.parse(
@@ -1919,6 +1924,62 @@ describe("streamViaCli", () => {
       // Delta only: the CLI session already holds FIRST and the reply.
       expect(sent).toContain("SECOND");
       expect(sent).not.toContain("FIRST");
+      await drain();
+    });
+
+    it("replays the stored prompt verbatim on resume, ignoring a drifted rebuild", async () => {
+      // Cache warmth depends on byte-identical bytes, and a rebuild is not
+      // byte-stable: buildSystemPrompt appends a tool-results paragraph as
+      // soon as history holds a toolResult. The stored copy must win.
+      writeMap({ "pi-sess-1": "cli-sess-9" });
+      fsx.mkdirSync(pathx.join(stateDir, "sysprompt"), { recursive: true });
+      fsx.writeFileSync(
+        pathx.join(stateDir, "sysprompt", "cli-sess-9.txt"),
+        "ORIGINAL PROMPT",
+      );
+
+      streamViaCli(
+        mockModels[0] as any,
+        {
+          systemPrompt: "DRIFTED PROMPT",
+          messages: [
+            { role: "user", content: "FIRST" },
+            ourAssistant,
+            { role: "toolResult", content: "r" },
+            { role: "user", content: "SECOND" },
+          ],
+        },
+        { sessionId: "pi-sess-1" } as any,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+
+      const args = (spawn as any).mock.calls[0][1] as string[];
+      const promptFile = args[args.indexOf("--append-system-prompt") + 1];
+      expect(fsx.readFileSync(promptFile, "utf-8")).toBe("ORIGINAL PROMPT");
+      await drain();
+    });
+
+    it("stores the created prompt so the next turn can replay it", async () => {
+      streamViaCli(
+        mockModels[0] as any,
+        {
+          systemPrompt: "SYS-ONE",
+          messages: [{ role: "user", content: "Hello" }],
+        },
+        { sessionId: "pi-sess-store" } as any,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+
+      const args = (spawn as any).mock.calls[0][1] as string[];
+      const cliId = args[args.indexOf("--session-id") + 1];
+      const stored = fsx.readFileSync(
+        pathx.join(stateDir, "sysprompt", `${cliId}.txt`),
+        "utf-8",
+      );
+      const promptFile = args[args.indexOf("--append-system-prompt") + 1];
+      // Byte-identical to what this very spawn sent.
+      expect(stored).toBe(fsx.readFileSync(promptFile, "utf-8"));
+      expect(stored).toContain("SYS-ONE");
       await drain();
     });
 

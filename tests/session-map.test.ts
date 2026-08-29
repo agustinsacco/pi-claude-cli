@@ -6,6 +6,9 @@ import {
   getCliSession,
   setCliSession,
   clearCliSession,
+  getSystemPrompt,
+  setSystemPrompt,
+  clearSystemPrompt,
 } from "../src/session-map";
 
 describe("session-map sidecar", () => {
@@ -74,5 +77,49 @@ describe("session-map sidecar", () => {
       "utf-8",
     );
     expect(JSON.parse(raw)["pi-1"]).toBe("cli-1");
+  });
+
+  describe("stored system prompt", () => {
+    it("round-trips a prompt verbatim", () => {
+      // Byte-exactness is the whole point: a resumed spawn re-sends these
+      // bytes, and any drift re-bills the transcript as cache write.
+      const prompt = "line one\n\nline two \u2014 with unicode\n";
+      setSystemPrompt("cli-1", prompt);
+      expect(getSystemPrompt("cli-1")).toBe(prompt);
+    });
+
+    it("returns undefined for a session recorded before prompts were stored", () => {
+      expect(getSystemPrompt("legacy-session")).toBeUndefined();
+    });
+
+    it("keeps prompts per session", () => {
+      setSystemPrompt("cli-1", "ONE");
+      setSystemPrompt("cli-2", "TWO");
+      expect(getSystemPrompt("cli-1")).toBe("ONE");
+      expect(getSystemPrompt("cli-2")).toBe("TWO");
+    });
+
+    it("clears a prompt, and clearing an absent one is a no-op", () => {
+      setSystemPrompt("cli-1", "ONE");
+      clearSystemPrompt("cli-1");
+      expect(getSystemPrompt("cli-1")).toBeUndefined();
+      expect(() => clearSystemPrompt("never-set")).not.toThrow();
+    });
+
+    it("creates the nested directory on first write", () => {
+      process.env.PI_CLAUDE_CLI_STATE_DIR = join(dir, "fresh");
+      setSystemPrompt("cli-1", "ONE");
+      expect(
+        readFileSync(join(dir, "fresh", "sysprompt", "cli-1.txt"), "utf-8"),
+      ).toBe("ONE");
+    });
+
+    it("does not throw when the state dir is unwritable", () => {
+      // Degrades to rebuilding the prompt, which is correct but less cacheable.
+      writeFileSync(join(dir, "blocker"), "not a directory");
+      process.env.PI_CLAUDE_CLI_STATE_DIR = join(dir, "blocker");
+      expect(() => setSystemPrompt("cli-1", "ONE")).not.toThrow();
+      expect(getSystemPrompt("cli-1")).toBeUndefined();
+    });
   });
 });

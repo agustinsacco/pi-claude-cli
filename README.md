@@ -126,9 +126,14 @@ misleading, `pi` mode rewrites pi's tool sections — which name pi's tools
 restyles its prompt so the `Available tools:` / `Guidelines:` anchors are
 missing, the prompt passes through untouched rather than being mangled.
 
-Only the session-creating turn sends a system prompt — the CLI keeps it for
-the life of the session — so a change takes effect on the next new session,
-not the current one.
+The system prompt goes on **every** spawn, not just the session-creating one:
+the CLI does not keep `--system-prompt` across `--resume`, and a resumed
+session without it silently reverts to Claude Code's default prompt from turn
+2 onwards. Because an identical prefix is what keeps the prompt cache warm,
+the prompt a session was created with is stored in the sidecar
+(`~/.pi/agent/pi-claude-cli/sysprompt/<cli-session-id>.txt`) and replayed
+verbatim rather than rebuilt. A change to the mode therefore takes effect on
+the next new session, not the current one.
 
 ## License
 
