@@ -768,3 +768,61 @@ describe("hermetic mode (issue #5)", () => {
     expect(args).not.toContain("--strict-mcp-config");
   });
 });
+
+describe("auto-compact window (PI_CLAUDE_CLI_AUTOCOMPACT)", () => {
+  const originalEnv = process.env.PI_CLAUDE_CLI_AUTOCOMPACT;
+
+  afterEach(() => {
+    if (originalEnv === undefined) delete process.env.PI_CLAUDE_CLI_AUTOCOMPACT;
+    else process.env.PI_CLAUDE_CLI_AUTOCOMPACT = originalEnv;
+  });
+
+  function lastAutocompactValue(): string | undefined {
+    const args = (spawn as any).mock.calls.at(-1)[1] as string[];
+    const idx = args.indexOf("--autocompact");
+    return idx === -1 ? undefined : args[idx + 1];
+  }
+
+  it("caps the window at 200k by default", () => {
+    delete process.env.PI_CLAUDE_CLI_AUTOCOMPACT;
+    spawnClaude("claude-haiku-4-5", undefined, {});
+    expect(lastAutocompactValue()).toBe("200000");
+  });
+
+  it("honours a configured window, normalized to plain tokens", () => {
+    process.env.PI_CLAUDE_CLI_AUTOCOMPACT = "400k";
+    spawnClaude("claude-haiku-4-5", undefined, {});
+    expect(lastAutocompactValue()).toBe("400000");
+  });
+
+  it("passes auto through for the CLI's own default", () => {
+    process.env.PI_CLAUDE_CLI_AUTOCOMPACT = "auto";
+    spawnClaude("claude-haiku-4-5", undefined, {});
+    expect(lastAutocompactValue()).toBe("auto");
+  });
+
+  it("omits the flag entirely when off (older CLIs reject unknown flags)", () => {
+    process.env.PI_CLAUDE_CLI_AUTOCOMPACT = "off";
+    spawnClaude("claude-haiku-4-5", undefined, {});
+    expect(lastAutocompactValue()).toBeUndefined();
+  });
+
+  it("rides resumed spawns too — the CLI keeps no flags across --resume", () => {
+    delete process.env.PI_CLAUDE_CLI_AUTOCOMPACT;
+    spawnClaude("claude-haiku-4-5", undefined, {
+      resumeSessionId: "11111111-1111-4111-8111-111111111111",
+    });
+    const args = (spawn as any).mock.calls.at(-1)[1] as string[];
+    expect(args).toContain("--resume");
+    expect(lastAutocompactValue()).toBe("200000");
+  });
+
+  it("never lets an invalid value reach the CLI (it would refuse to start)", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    process.env.PI_CLAUDE_CLI_AUTOCOMPACT = "50k";
+    spawnClaude("claude-haiku-4-5", undefined, {});
+    expect(lastAutocompactValue()).toBe("200000");
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+});
