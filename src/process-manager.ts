@@ -16,6 +16,7 @@ import {
   DEFAULT_SYSTEM_PROMPT_MODE,
   type SystemPromptMode,
 } from "./system-prompt-mode.js";
+import { resolveAutocompact } from "./autocompact.js";
 
 /**
  * Spawn a Claude CLI subprocess with all required flags for stream-json communication.
@@ -141,6 +142,16 @@ export function spawnClaude(
 
   if (options?.mcpConfigPath) {
     args.push("--mcp-config", options.mcpConfigPath);
+  }
+
+  // Auto-compact window (PI_CLAUDE_CLI_AUTOCOMPACT, default 200k — see
+  // src/autocompact.ts). The CLI does not keep flags across --resume, so
+  // like the system prompt this goes on every spawn. Resolved per spawn so
+  // a host can change the setting without restarting pi; the flag is
+  // config, not context, so changing it never invalidates the prompt cache.
+  const autocompact = resolveAutocompact();
+  if (autocompact !== undefined) {
+    args.push("--autocompact", autocompact);
   }
 
   const proc = spawn("claude", args, {

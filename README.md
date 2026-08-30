@@ -95,6 +95,38 @@ allowlists). Model access and your subscription login are unaffected.
 Related knobs: `PI_CLAUDE_CLI_TIMEOUT_MS` overrides the 300s inactivity
 timeout (CLI-side tools can be silent on stdout for minutes).
 
+### Auto-compact window
+
+The provider resumes **one** CLI session for a pi session's whole life, and
+nothing else ever shrinks it. On 1M-context models the CLI's own auto-compact
+default lets that session ratchet toward a million tokens — measured across 26
+real sessions, contexts reached 480k+, the average request carried 202k
+tokens, and every request re-reads the full context. So the provider passes
+`--autocompact 200000` **by default**: Claude Code compacts the session itself
+when its context nears 200k, keeping the cached system-prompt prefix and full
+transcript fidelity.
+
+`PI_CLAUDE_CLI_AUTOCOMPACT` configures it (read per spawn, like the flags
+above):
+
+| Value                   | Behaviour                                                                                      |
+| ----------------------- | ---------------------------------------------------------------------------------------------- |
+| _(unset)_               | `--autocompact 200000` — the 200k budget these models run under everywhere the 1M beta is off. |
+| `400k`, `400000`, `400` | Any window from 100k to 1M; bare numbers are thousands (CLI shorthand).                        |
+| `auto`                  | `--autocompact auto` — the CLI's own default (≈ the model's full window).                      |
+| `off`                   | Omit the flag entirely (use on CLIs that predate `--autocompact`).                             |
+
+The value is a token **count**, not a percentage: cache read/write bill per
+token and every request re-reads the whole context, so the sane budget is the
+same on a 200k model and a 1M one. Invalid values warn and fall back to the
+default instead of reaching the CLI, which rejects them by refusing to start.
+
+Note for pre-existing sessions: the first resumed turn of a session already
+past the window compacts immediately — one summarization pass, then the
+session continues small. That is the remediation, not a bug. pi's own
+compaction is separate (it rewrites pi's transcript, never the CLI session's)
+and with this cap it should rarely trigger.
+
 ### Which system prompt
 
 `PI_CLAUDE_CLI_SYSTEM_PROMPT` chooses whose system prompt the subprocess
