@@ -22,8 +22,9 @@ import {
  *
  * @param modelId - The model ID to pass via --model flag
  * @param systemPrompt - Optional system prompt. In `claude` mode it is appended
- *   to Claude Code's own via --append-system-prompt; in `pi` mode it replaces
- *   it via --system-prompt. See src/system-prompt-mode.ts.
+ *   to Claude Code's own via --append-system-prompt-file; in `pi` mode it
+ *   replaces it via --system-prompt-file. The `-file` suffix is required: the
+ *   unsuffixed flags take a literal string. See src/system-prompt-mode.ts.
  * @param options - Optional cwd, AbortSignal, effort level and prompt mode
  * @returns The spawned ChildProcess with piped stdin/stdout/stderr
  */
@@ -98,8 +99,16 @@ export function spawnClaude(
   }
 
   if (systemPrompt) {
-    // Write system prompt to a temp file to avoid ENAMETOOLONG on Windows.
-    // Both flags accept a file path or literal text.
+    // Write the system prompt to a temp file and pass the FILE flags.
+    //
+    // `--system-prompt` / `--append-system-prompt` take a literal string, NOT
+    // a path: handing them a path makes the path itself the system prompt, so
+    // pi's instructions never reach the model and the session silently runs on
+    // Claude Code's defaults. Verified on claude 2.1.231 — with a path the
+    // model denied having the codename its prompt assigned; with
+    // `--system-prompt-file` it answered correctly. The file variants also keep
+    // the prompt off the command line, which is what avoids ENAMETOOLONG on
+    // Windows.
     //
     // Keyed by CLI session, not just pid: the prompt goes on every spawn
     // (see provider.ts), and pi can run two turns of one process at once —
@@ -113,7 +122,7 @@ export function spawnClaude(
     // pi's on top of it. See src/system-prompt-mode.ts for the trade-off.
     const mode = options?.systemPromptMode ?? DEFAULT_SYSTEM_PROMPT_MODE;
     args.push(
-      mode === "pi" ? "--system-prompt" : "--append-system-prompt",
+      mode === "pi" ? "--system-prompt-file" : "--append-system-prompt-file",
       tmpFile,
     );
   }

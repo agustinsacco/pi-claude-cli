@@ -1,6 +1,6 @@
 {
   "name": "@saccolabs/pi-claude-cli",
-  "version": "0.4.15",
+  "version": "0.4.16",
   "description": "Pi coding agent extension that routes LLM calls through the Claude Code CLI",
   "main": "index.ts",
   "keywords": [

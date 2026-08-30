@@ -2,12 +2,16 @@
  * Which system prompt the Claude CLI subprocess runs under.
  *
  * `claude` (the default) appends pi's prompt to Claude Code's own via
- * `--append-system-prompt`. Everything the CLI normally knows about its
+ * `--append-system-prompt-file`. Everything the CLI normally knows about its
  * built-in tools stays in place, and pi's instructions ride on top.
  *
- * `pi` replaces Claude Code's prompt outright via `--system-prompt`, leaving
- * only pi's — the point of a minimal harness being that it does not inherit
- * another agent's preamble.
+ * `pi` replaces Claude Code's prompt outright via `--system-prompt-file`,
+ * leaving only pi's — the point of a minimal harness being that it does not
+ * inherit another agent's preamble.
+ *
+ * The `-file` suffix is not optional: the unsuffixed flags take a literal
+ * string, and passing them a path (as this provider did until 2026-08-29)
+ * makes the path itself the prompt, silently. See process-manager.ts.
  *
  * Sizing, measured rather than assumed: in a real session the CLI's fixed
  * cached prefix sat at 17,475 tokens. That is Claude Code's system prompt

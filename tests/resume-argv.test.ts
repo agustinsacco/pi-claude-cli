@@ -78,7 +78,7 @@ describe.skipIf(process.platform === "win32")(
 ` +
           `let sysprompt = null;
 ` +
-          `for (const flag of ["--system-prompt", "--append-system-prompt"]) {
+          `for (const flag of ["--system-prompt-file", "--append-system-prompt-file"]) {
 ` +
           `  const i = argv.indexOf(flag);
 ` +
@@ -165,8 +165,8 @@ describe.skipIf(process.platform === "win32")(
         expect(second.argv).toContain("--resume");
 
         // Both spawns carry the prompt. Dropping it on resume is the bug.
-        expect(first.argv).toContain("--append-system-prompt");
-        expect(second.argv).toContain("--append-system-prompt");
+        expect(first.argv).toContain("--append-system-prompt-file");
+        expect(second.argv).toContain("--append-system-prompt-file");
 
         // Byte-identical, or the prefix cache misses just as badly as if the
         // prompt had been omitted.
@@ -178,7 +178,7 @@ describe.skipIf(process.platform === "win32")(
         // serialized by pi and legitimately share the path.
         const cliId = second.argv[second.argv.indexOf("--resume") + 1];
         const pathOf = (a: string[]) =>
-          a[a.indexOf("--append-system-prompt") + 1];
+          a[a.indexOf("--append-system-prompt-file") + 1];
         expect(pathOf(second.argv)).toContain(cliId);
         expect(pathOf(first.argv)).toContain(cliId);
       },

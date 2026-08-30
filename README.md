@@ -100,10 +100,17 @@ timeout (CLI-side tools can be silent on stdout for minutes).
 `PI_CLAUDE_CLI_SYSTEM_PROMPT` chooses whose system prompt the subprocess
 runs under. It is read per spawn, so a host can change it between sessions.
 
-| Value                | Behaviour                                                                 |
-| -------------------- | ------------------------------------------------------------------------- |
-| `claude` _(default)_ | `--append-system-prompt`: pi's prompt layers on top of Claude Code's own. |
-| `pi`                 | `--system-prompt`: pi's prompt replaces Claude Code's entirely.           |
+| Value                | Behaviour                                                                      |
+| -------------------- | ------------------------------------------------------------------------------ |
+| `claude` _(default)_ | `--append-system-prompt-file`: pi's prompt layers on top of Claude Code's own. |
+| `pi`                 | `--system-prompt-file`: pi's prompt replaces Claude Code's entirely.           |
+
+The `-file` suffix matters: `--system-prompt` / `--append-system-prompt`
+(unsuffixed) take a **literal string**, not a path. Passing a temp-file path
+to the unsuffixed flag makes the path itself the prompt — pi's instructions
+never reach the model, silently, with no error. This shipped unnoticed since
+the provider's system-prompt support was first added; see the correction
+below.
 
 `minimal` is accepted as an alias for `pi`, `append` for `claude`; anything
 unrecognised falls back to the default rather than failing a session.
@@ -127,13 +134,25 @@ restyles its prompt so the `Available tools:` / `Guidelines:` anchors are
 missing, the prompt passes through untouched rather than being mangled.
 
 The system prompt goes on **every** spawn, not just the session-creating one:
-the CLI does not keep `--system-prompt` across `--resume`, and a resumed
+the CLI does not keep `--system-prompt-file` across `--resume`, and a resumed
 session without it silently reverts to Claude Code's default prompt from turn
 2 onwards. Because an identical prefix is what keeps the prompt cache warm,
 the prompt a session was created with is stored in the sidecar
 (`~/.pi/agent/pi-claude-cli/sysprompt/<cli-session-id>.txt`) and replayed
 verbatim rather than rebuilt. A change to the mode therefore takes effect on
 the next new session, not the current one.
+
+> **Correction (2026-08-29).** Both bullets above named the unsuffixed flags
+> until this date. They were wrong the whole time the provider has supported a
+> system prompt: `--system-prompt` / `--append-system-prompt` take a literal
+> string, and the provider was handing them a temp-file path. That path string
+> either became the entire "system prompt" (`pi` mode) or got appended as
+> noise Claude Code's model ignored (`claude` mode) — either way, pi's actual
+> instructions never reached the model, on ANY turn, since the very first spawn.
+> Fixed by switching to `--system-prompt-file` / `--append-system-prompt-file`,
+> which take a path. See
+> [pidex's write-up](https://github.com/agustinsacco/pidex/blob/main/specs/log/2026-08-29-claude-cli-lifecycle-verification.md)
+> for the live before/after.
 
 ## License
 

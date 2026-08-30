@@ -1915,7 +1915,7 @@ describe("streamViaCli", () => {
       expect(args).not.toContain("--session-id");
       // The CLI drops --system-prompt on resume, so it must be re-sent every
       // turn or the session silently reverts to Claude Code's own prompt.
-      expect(args).toContain("--append-system-prompt");
+      expect(args).toContain("--append-system-prompt-file");
 
       const proc = (spawn as any).mock.results[0].value;
       const sent = JSON.parse(
@@ -1954,7 +1954,7 @@ describe("streamViaCli", () => {
       await vi.advanceTimersByTimeAsync(0);
 
       const args = (spawn as any).mock.calls[0][1] as string[];
-      const promptFile = args[args.indexOf("--append-system-prompt") + 1];
+      const promptFile = args[args.indexOf("--append-system-prompt-file") + 1];
       expect(fsx.readFileSync(promptFile, "utf-8")).toBe("ORIGINAL PROMPT");
       await drain();
     });
@@ -1976,7 +1976,7 @@ describe("streamViaCli", () => {
         pathx.join(stateDir, "sysprompt", `${cliId}.txt`),
         "utf-8",
       );
-      const promptFile = args[args.indexOf("--append-system-prompt") + 1];
+      const promptFile = args[args.indexOf("--append-system-prompt-file") + 1];
       // Byte-identical to what this very spawn sent.
       expect(stored).toBe(fsx.readFileSync(promptFile, "utf-8"));
       expect(stored).toContain("SYS-ONE");
