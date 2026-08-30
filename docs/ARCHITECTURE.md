@@ -51,8 +51,10 @@ transcript (`USER:` / `ASSISTANT:` / `TOOL RESULT (historical <tool>):`).
 Images in the **final** user message are translated from pi-ai's
 `{data, mimeType}` shape to Anthropic's `{source:{type:"base64",…}}` blocks;
 images earlier in history degrade to placeholder text. pi's system prompt
-rides in through `--append-system-prompt` (written to a temp file to avoid
-Windows `ENAMETOOLONG`).
+rides in through `--append-system-prompt-file` (a temp file path — the
+unsuffixed `--append-system-prompt` takes a literal string, and handing it a
+path silently makes the path itself the prompt; also avoids Windows
+`ENAMETOOLONG`).
 
 ### Spawn
 
@@ -385,11 +387,18 @@ created with.
 
 - **Resume:** mapping present and not stale → `--resume <cliId>` with a
   **delta** prompt (only what follows the last assistant turn), plus the
-  stored system prompt replayed verbatim. The prompt is NOT optional here:
-  the CLI drops `--system-prompt` on resume, so omitting it both loses pi's
-  instructions and re-bills the transcript as cache write (measured
-  2026-08-29: 9,761 write tokens without it, 112 with it). Verbatim rather
-  than rebuilt because `buildSystemPrompt` is not byte-stable across turns.
+  stored system prompt replayed verbatim via `--system-prompt-file` /
+  `--append-system-prompt-file`. The prompt is NOT optional here: the CLI
+  drops it on resume, so omitting it both loses pi's instructions and
+  re-bills the transcript as cache write (measured 2026-08-29: 9,761 write
+  tokens without it, 112 with it). Verbatim rather than rebuilt because
+  `buildSystemPrompt` is not byte-stable across turns.
+  > **Correction (2026-08-29, same day):** this section and the fix it
+  > describes used the unsuffixed `--system-prompt` / `--append-system-prompt`
+  > flags. Those take a literal string, not a path, and the provider was
+  > passing a temp-file path — so pi's instructions never reached the model on
+  > **any** turn, including the first, for as long as the provider has
+  > supported a system prompt. Fixed by switching to the `-file` variants.
 - **Create/import:** no mapping, stale, resume miss, or failed prior turn →
   fresh provider-minted UUID under `--session-id`, full flattened history,
   system prompt attached, mapping recorded. Never pi's id — the CLI refuses

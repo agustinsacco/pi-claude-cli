@@ -409,10 +409,11 @@ export function rewritePiToolSections(systemPrompt: string): string {
  * appending AGENTS.md content if found (walking up from cwd, then global fallback).
  * Sanitizes .pi references to .claude for Claude Code compatibility.
  *
- * In `pi` mode the caller passes the prompt to `--system-prompt`, replacing
- * Claude Code's own, so pi's tool sections are rewritten into Claude Code's
- * names first. In `claude` mode the prompt is appended to Claude Code's and
- * pi's wording is left exactly as pi wrote it.
+ * In `pi` mode the caller passes the prompt to `--system-prompt-file`,
+ * replacing Claude Code's own, so pi's tool sections are rewritten into Claude
+ * Code's names first. In `claude` mode the prompt is appended to Claude
+ * Code's (`--append-system-prompt-file`) and pi's wording is left exactly as
+ * pi wrote it.
  */
 export function buildSystemPrompt(
   context: { systemPrompt?: string; messages: any[] },

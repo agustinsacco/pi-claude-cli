@@ -95,13 +95,41 @@ describe("spawnClaude", () => {
     expect(options.cwd).toBe("/custom/path");
   });
 
-  it("writes system prompt to temp file and passes path via --append-system-prompt", () => {
+  it("writes system prompt to temp file and passes path via --append-system-prompt-file", () => {
     spawnClaude("claude-sonnet-4-5-20250929", "You are a helpful assistant.");
     const args = (spawn as any).mock.calls[0][1] as string[];
 
-    expect(args).toContain("--append-system-prompt");
-    const idx = args.indexOf("--append-system-prompt");
+    expect(args).toContain("--append-system-prompt-file");
+    const idx = args.indexOf("--append-system-prompt-file");
     expect(args[idx + 1]).toContain("pi-claude-cli-sysprompt-");
+  });
+
+  it("never passes a path to the STRING form of either flag", () => {
+    // `--system-prompt` / `--append-system-prompt` take literal text. Handing
+    // one a path makes the path itself the system prompt: pi's instructions
+    // never reach the model, and the session silently runs on Claude Code's
+    // defaults. There is no error and no warning, so only this assertion and
+    // the live codename check stand between that bug and a release.
+    for (const mode of ["pi", "claude"] as const) {
+      (spawn as any).mockClear();
+      spawnClaude(
+        "claude-sonnet-4-5-20250929",
+        "You are a helpful assistant.",
+        {
+          systemPromptMode: mode,
+        },
+      );
+      const args = (spawn as any).mock.calls[0][1] as string[];
+      expect(args).not.toContain("--system-prompt");
+      expect(args).not.toContain("--append-system-prompt");
+      const flag =
+        mode === "pi" ? "--system-prompt-file" : "--append-system-prompt-file";
+      expect(args).toContain(flag);
+      // The value must be a real, readable file, not prompt text.
+      expect(readFileSync(args[args.indexOf(flag) + 1], "utf-8")).toBe(
+        "You are a helpful assistant.",
+      );
+    }
   });
 
   it("temp file contains the system prompt text", () => {
@@ -117,7 +145,7 @@ describe("spawnClaude", () => {
   it("does not include --append-system-prompt when no system prompt", () => {
     spawnClaude("claude-sonnet-4-5-20250929");
     const args = (spawn as any).mock.calls[0][1] as string[];
-    expect(args).not.toContain("--append-system-prompt");
+    expect(args).not.toContain("--append-system-prompt-file");
   });
 
   it("returns the spawned ChildProcess", () => {
@@ -179,7 +207,7 @@ describe("effort flag", () => {
     });
     const args = (spawn as any).mock.calls[0][1] as string[];
 
-    expect(args).toContain("--append-system-prompt");
+    expect(args).toContain("--append-system-prompt-file");
     expect(args).not.toContain("--effort");
   });
 });
@@ -445,7 +473,7 @@ describe("mcp-config flag", () => {
     });
     const args = (spawn as any).mock.calls[0][1] as string[];
 
-    expect(args).toContain("--append-system-prompt");
+    expect(args).toContain("--append-system-prompt-file");
     expect(args).toContain("--effort");
     expect(args).not.toContain("--mcp-config");
     expect(args).toContain("--permission-prompt-tool");
