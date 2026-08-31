@@ -3,12 +3,14 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 // Hoist mock references so they survive vi.mock hoisting
 const mocks = vi.hoisted(() => ({
   writeFileSync: vi.fn(),
+  unlinkSync: vi.fn(),
   tmpdir: vi.fn(() => "/tmp"),
 }));
 
-// Mock node:fs writeFileSync to avoid disk I/O
+// Mock node:fs writeFileSync/unlinkSync to avoid disk I/O
 vi.mock("node:fs", () => ({
   writeFileSync: mocks.writeFileSync,
+  unlinkSync: mocks.unlinkSync,
 }));
 
 // Mock node:os tmpdir
@@ -16,7 +18,12 @@ vi.mock("node:os", () => ({
   tmpdir: mocks.tmpdir,
 }));
 
-import { getCustomToolDefs, writeMcpConfig } from "../src/mcp-config";
+import {
+  getCustomToolDefs,
+  writeMcpConfig,
+  cleanupMcpConfigFiles,
+  resetMcpConfigCache,
+} from "../src/mcp-config";
 import type { McpToolDef } from "../src/mcp-config";
 
 describe("getCustomToolDefs", () => {
@@ -175,6 +182,7 @@ describe("writeMcpConfig", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.tmpdir.mockReturnValue("/tmp");
+    resetMcpConfigCache();
   });
 
   it("writes schema file to tmpdir with correct content (JSON array of tool defs)", () => {
@@ -266,7 +274,105 @@ describe("writeMcpConfig", () => {
 
     const result = writeMcpConfig(toolDefs);
 
-    expect(result).toMatch(/pi-claude-mcp-config/);
-    expect(result).toMatch(/\.json$/);
+    expect(result.configPath).toMatch(/pi-claude-mcp-config/);
+    expect(result.configPath).toMatch(/\.json$/);
+    expect(result.changed).toBe(true);
+  });
+});
+
+describe("writeMcpConfig refresh", () => {
+  const defs = (description: string): McpToolDef[] => [
+    { name: "mcp", description, inputSchema: { type: "object" } },
+  ];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.tmpdir.mockReturnValue("/tmp");
+    resetMcpConfigCache();
+  });
+
+  it("does not rewrite either file when the tool surface is unchanged", () => {
+    writeMcpConfig(defs("Servers: linear"));
+    const afterFirst = mocks.writeFileSync.mock.calls.length;
+
+    const second = writeMcpConfig(defs("Servers: linear"));
+
+    expect(second.changed).toBe(false);
+    expect(mocks.writeFileSync.mock.calls.length).toBe(afterFirst);
+  });
+
+  it("rewrites the schema file when the tool surface changes", () => {
+    writeMcpConfig(defs("Servers: linear"));
+    mocks.writeFileSync.mockClear();
+
+    const second = writeMcpConfig(defs("Servers: linear, notion"));
+
+    expect(second.changed).toBe(true);
+    const schemaWrites = mocks.writeFileSync.mock.calls.filter(
+      (call: unknown[]) => /pi-claude-mcp-schemas/.test(String(call[0])),
+    );
+    expect(schemaWrites).toHaveLength(1);
+    expect(JSON.parse(String(schemaWrites[0][1]))[0].description).toBe(
+      "Servers: linear, notion",
+    );
+  });
+
+  it("keeps a stable path across refreshes so temp files never accumulate", () => {
+    const first = writeMcpConfig(defs("a"));
+    const second = writeMcpConfig(defs("b"));
+
+    expect(second.configPath).toBe(first.configPath);
+    const schemaPaths = new Set(
+      mocks.writeFileSync.mock.calls
+        .map((call: unknown[]) => String(call[0]))
+        .filter((path: string) => /pi-claude-mcp-schemas/.test(path)),
+    );
+    expect(schemaPaths.size).toBe(1);
+  });
+
+  it("writes the config file once, not on every refresh", () => {
+    writeMcpConfig(defs("a"));
+    mocks.writeFileSync.mockClear();
+
+    writeMcpConfig(defs("b"));
+
+    const configWrites = mocks.writeFileSync.mock.calls.filter(
+      (call: unknown[]) => /pi-claude-mcp-config/.test(String(call[0])),
+    );
+    expect(configWrites).toHaveLength(0);
+  });
+});
+
+describe("cleanupMcpConfigFiles", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.tmpdir.mockReturnValue("/tmp");
+    resetMcpConfigCache();
+  });
+
+  it("unlinks both the schema and the config file", () => {
+    writeMcpConfig([
+      { name: "mcp", description: "d", inputSchema: { type: "object" } },
+    ]);
+
+    cleanupMcpConfigFiles();
+
+    const removed = mocks.unlinkSync.mock.calls.map((call: unknown[]) =>
+      String(call[0]),
+    );
+    expect(removed.some((p: string) => /pi-claude-mcp-schemas/.test(p))).toBe(
+      true,
+    );
+    expect(removed.some((p: string) => /pi-claude-mcp-config/.test(p))).toBe(
+      true,
+    );
+  });
+
+  it("is safe when the files were never written", () => {
+    mocks.unlinkSync.mockImplementation(() => {
+      throw new Error("ENOENT");
+    });
+
+    expect(() => cleanupMcpConfigFiles()).not.toThrow();
   });
 });

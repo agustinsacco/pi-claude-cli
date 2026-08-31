@@ -92,6 +92,22 @@ schema-only custom-tools server loads) and an empty `--setting-sources`
 (no user/project/local settings — hooks, auto-memory, permission
 allowlists). Model access and your subscription login are unaffected.
 
+### Strict MCP mode
+
+`PI_CLAUDE_CLI_STRICT_MCP=1` passes `--strict-mcp-config` **on its own**, with
+no `--setting-sources` blackout. Use it to route every MCP call through pi's
+own tool registry — typically `pi-mcp-adapter`'s `mcp` gateway — while leaving
+the CLI's settings, hooks and `CLAUDE.md` auto-memory alone.
+
+Reach for this instead of hermetic mode when the host suppresses pi's copy of
+`CLAUDE.md` and relies on the CLI to load it: hermetic mode would leave the
+model with project instructions from neither side. Hermetic mode still implies
+strict MCP, so setting both is safe.
+
+Why a host wants it: MCP servers the host did not configure are invisible to
+it, bypass its tool guards, and are never counted by pi-side status or context
+accounting.
+
 Related knobs: `PI_CLAUDE_CLI_TIMEOUT_MS` overrides the 300s inactivity
 timeout (CLI-side tools can be silent on stdout for minutes).
 

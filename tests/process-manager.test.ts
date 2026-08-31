@@ -737,6 +737,56 @@ describe("cleanupSystemPromptFile", () => {
   });
 });
 
+describe("strict MCP mode", () => {
+  const originalStrict = process.env.PI_CLAUDE_CLI_STRICT_MCP;
+  const originalHermetic = process.env.PI_CLAUDE_CLI_HERMETIC;
+
+  afterEach(() => {
+    if (originalStrict === undefined)
+      delete process.env.PI_CLAUDE_CLI_STRICT_MCP;
+    else process.env.PI_CLAUDE_CLI_STRICT_MCP = originalStrict;
+    if (originalHermetic === undefined)
+      delete process.env.PI_CLAUDE_CLI_HERMETIC;
+    else process.env.PI_CLAUDE_CLI_HERMETIC = originalHermetic;
+  });
+
+  it("adds --strict-mcp-config WITHOUT touching --setting-sources", () => {
+    process.env.PI_CLAUDE_CLI_STRICT_MCP = "1";
+    delete process.env.PI_CLAUDE_CLI_HERMETIC;
+
+    spawnClaude("claude-haiku-4-5", undefined, {});
+    const args = (spawn as any).mock.calls.at(-1)[1] as string[];
+
+    expect(args).toContain("--strict-mcp-config");
+    // The whole point of the split: CLAUDE.md auto-memory stays loaded.
+    expect(args).not.toContain("--setting-sources");
+  });
+
+  it("does not double up when hermetic mode is also enabled", () => {
+    process.env.PI_CLAUDE_CLI_STRICT_MCP = "1";
+    process.env.PI_CLAUDE_CLI_HERMETIC = "1";
+
+    spawnClaude("claude-haiku-4-5", undefined, {});
+    const args = (spawn as any).mock.calls.at(-1)[1] as string[];
+
+    expect(args.filter((a) => a === "--strict-mcp-config")).toHaveLength(1);
+    expect(args).toContain("--setting-sources");
+  });
+
+  it("stays off when unset or falsy", () => {
+    delete process.env.PI_CLAUDE_CLI_STRICT_MCP;
+    delete process.env.PI_CLAUDE_CLI_HERMETIC;
+    spawnClaude("claude-haiku-4-5", undefined, {});
+    let args = (spawn as any).mock.calls.at(-1)[1] as string[];
+    expect(args).not.toContain("--strict-mcp-config");
+
+    process.env.PI_CLAUDE_CLI_STRICT_MCP = "0";
+    spawnClaude("claude-haiku-4-5", undefined, {});
+    args = (spawn as any).mock.calls.at(-1)[1] as string[];
+    expect(args).not.toContain("--strict-mcp-config");
+  });
+});
+
 describe("hermetic mode (issue #5)", () => {
   const originalEnv = process.env.PI_CLAUDE_CLI_HERMETIC;
 

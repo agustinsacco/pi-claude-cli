@@ -29,10 +29,23 @@ import { resolveAutocompact } from "./autocompact.js";
  * @param options - Optional cwd, AbortSignal, effort level and prompt mode
  * @returns The spawned ChildProcess with piped stdin/stdout/stderr
  */
+/** Truthy env opt-in: "1", "true" or "yes", case-insensitive. */
+function envFlag(name: string): boolean {
+  const value = (process.env[name] ?? "").toLowerCase();
+  return value === "1" || value === "true" || value === "yes";
+}
+
 /** Truthy PI_CLAUDE_CLI_HERMETIC opts in to hermetic mode (see README). */
 function isHermetic(): boolean {
-  const value = (process.env.PI_CLAUDE_CLI_HERMETIC ?? "").toLowerCase();
-  return value === "1" || value === "true" || value === "yes";
+  return envFlag("PI_CLAUDE_CLI_HERMETIC");
+}
+
+/**
+ * Truthy PI_CLAUDE_CLI_STRICT_MCP restricts the CLI to this extension's own
+ * schema-only server WITHOUT hermetic mode's settings blackout (see README).
+ */
+function isStrictMcp(): boolean {
+  return envFlag("PI_CLAUDE_CLI_STRICT_MCP");
 }
 
 /**
@@ -81,14 +94,25 @@ export function spawnClaude(
     "AskUserQuestion",
   ];
 
-  // Hermetic mode: keep the user's Claude Code environment out of pi turns.
+  // Two independent ways to keep the user's Claude Code environment out of pi
+  // turns. Both flags verified accepted on claude 2.1.237.
+  //
   // --strict-mcp-config loads ONLY the servers from --mcp-config (our
-  // schema-only custom-tools server survives; personal/project MCP servers
-  // do not), and an empty --setting-sources skips user/project/local
-  // settings — hooks, CLAUDE.md auto-memory, permission allowlists.
-  // Both flags verified accepted on claude 2.1.237.
+  // schema-only custom-tools server survives; the user's personal and project
+  // MCP servers do not). A host wants this on its own: MCP servers the host
+  // did not configure are invisible to it, bypass its tool guards, and are
+  // never counted by pi-side status or context accounting.
+  if (isHermetic() || isStrictMcp()) {
+    args.push("--strict-mcp-config");
+  }
+
+  // An empty --setting-sources skips user/project/local settings — hooks,
+  // CLAUDE.md auto-memory, permission allowlists. Kept separate from the MCP
+  // flag on purpose: a host that already suppresses pi's own copy of
+  // CLAUDE.md relies on the CLI loading it, and bundling the two would leave
+  // the model with no project instructions from either side.
   if (isHermetic()) {
-    args.push("--strict-mcp-config", "--setting-sources", "");
+    args.push("--setting-sources", "");
   }
 
   if (options?.resumeSessionId) {
