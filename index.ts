@@ -14,13 +14,19 @@ import {
   validateCliAuth,
   killAllProcesses,
 } from "./src/process-manager.js";
-import { getCustomToolDefs, writeMcpConfig } from "./src/mcp-config.js";
+import {
+  getCustomToolDefs,
+  writeMcpConfig,
+  cleanupMcpConfigFiles,
+} from "./src/mcp-config.js";
 import { rewriteOverflowMessage } from "./src/overflow.js";
 import { buildRateLimitPayload, rateLimitIdentity } from "./src/rate-limit.js";
 import type { TaskTrackerState } from "./src/types.js";
 
 // Kill all active Claude subprocesses on process exit to prevent orphans
 process.on("exit", killAllProcesses);
+// Remove the schema/config temp files this process staged in tmpdir
+process.on("exit", cleanupMcpConfigFiles);
 
 const PROVIDER_ID = "pi-claude-cli";
 
@@ -95,37 +101,43 @@ function publishTaskProgress(state: TaskTrackerState): void {
 }
 
 let mcpConfigPath: string | undefined;
-let mcpConfigResolved = false;
 
 /**
- * Lazily generate MCP config on first request (not at load time).
- * pi.getAllTools() fails during extension loading; this defers it
- * until the pi runtime is fully initialized.
+ * Generate the MCP config on first request, then keep it in step with pi's
+ * tool registry. Not done at load time: pi.getAllTools() fails while
+ * extensions are still loading.
  *
- * Only locks (sets mcpConfigResolved) when getAllTools() returns a
- * real array — if it returns undefined/null (registry not ready),
- * we retry on the next request. Once the registry is ready we
- * commit to the result even if there are zero custom tools.
+ * Re-checked on EVERY request rather than locked after the first. pi packages
+ * register and unregister tools at runtime — pi-mcp-adapter re-registers its
+ * `mcp` gateway with a fresh description whenever an MCP server is added,
+ * enabled or disabled — and a locked snapshot left the CLI advertising a
+ * turn-1 tool surface for the whole session. writeMcpConfig only touches disk
+ * when the surface actually changed, so the steady-state cost is one
+ * getAllTools() call and a string compare.
+ *
+ * The CLI reads --mcp-config at spawn and the provider spawns per turn, so a
+ * mid-session change lands on the NEXT turn, not the one in flight.
  *
  * Uses warn-don't-block: failure logs a warning but does not
  * prevent the provider from functioning (built-ins still work).
  */
 function ensureMcpConfig(pi: ExtensionAPI): string | undefined {
-  if (mcpConfigResolved) return mcpConfigPath;
   try {
     const allTools = pi.getAllTools();
 
-    // Registry not ready yet — don't lock, retry on next call
+    // Registry not ready yet — retry on the next call
     if (!Array.isArray(allTools)) {
       return mcpConfigPath;
     }
 
-    // Registry is ready — lock regardless of whether custom tools exist
-    mcpConfigResolved = true;
-
     const toolDefs = getCustomToolDefs(pi);
-    if (toolDefs.length > 0) {
-      mcpConfigPath = writeMcpConfig(toolDefs);
+    if (toolDefs.length === 0) {
+      return mcpConfigPath;
+    }
+
+    const { configPath, changed } = writeMcpConfig(toolDefs);
+    mcpConfigPath = configPath;
+    if (changed) {
       console.error(
         `[pi-claude-cli] MCP config generated with ${toolDefs.length} custom tool(s)`,
       );
