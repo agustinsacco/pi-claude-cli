@@ -660,6 +660,180 @@ describe("createEventBridge", () => {
       expect(event.toolCall.arguments).toBe("not valid json at all");
     });
 
+    /**
+     * Claude streams a tool call's arguments as input_json_delta events. A
+     * call with NO arguments produces no deltas at all, so the accumulator is
+     * still "" when the block stops. JSON.parse("") throws, and the raw ""
+     * used to be handed to pi, which rejected it against the tool's schema
+     * with `root: must be object`.
+     *
+     * That killed every zero-argument handoff tool: `mcp({})` — the
+     * documented first step for checking MCP status — and `artifact_list()`.
+     */
+    describe("zero-argument tool calls", () => {
+      function runToolCall(
+        name: string,
+        deltas: string[],
+      ): { arguments: unknown; name: string; id: string } {
+        const bridge = createBridgeWithStart();
+        bridge.handleEvent({
+          type: "content_block_start",
+          index: 0,
+          content_block: { type: "tool_use", id: "toolu_01", name },
+        });
+        for (const partial_json of deltas) {
+          bridge.handleEvent({
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "input_json_delta", partial_json },
+          });
+        }
+        stream.push.mockClear();
+        stream.events.length = 0;
+        bridge.handleEvent({ type: "content_block_stop", index: 0 });
+        const event = stream.events[0] as any;
+        expect(event.type).toBe("toolcall_end");
+        return event.toolCall;
+      }
+
+      it('emits {} — not "" — when the model sends no arguments at all', () => {
+        const toolCall = runToolCall("mcp__custom-tools__mcp", []);
+        expect(toolCall.arguments).toEqual({});
+        // The specific regression: a bare string fails pi's schema check.
+        expect(typeof toolCall.arguments).toBe("object");
+      });
+
+      it("emits {} when the accumulated payload is only whitespace", () => {
+        const toolCall = runToolCall("mcp__custom-tools__mcp", ["  ", "\n"]);
+        expect(toolCall.arguments).toEqual({});
+      });
+
+      it("leaves an explicit {} payload alone", () => {
+        const toolCall = runToolCall("mcp__custom-tools__mcp", ["{}"]);
+        expect(toolCall.arguments).toEqual({});
+      });
+
+      it("makes 'no deltas' and an explicit {} indistinguishable", () => {
+        // The whole point of the fix: pi must not be able to tell the two
+        // apart, because the model means the same thing by them.
+        const noDeltas = runToolCall("mcp__custom-tools__mcp", []);
+        const explicit = runToolCall("mcp__custom-tools__mcp", ["{}"]);
+        expect(noDeltas.arguments).toEqual(explicit.arguments);
+        expect(noDeltas.name).toBe(explicit.name);
+      });
+
+      /**
+       * The counterpart guarantee. A truncated stream is NOT empty, and its
+       * raw text is the only evidence of what arrived — blanking it to {}
+       * would turn a visible failure into a tool that silently ran with no
+       * arguments. Malformed stays malformed.
+       */
+      it.each([
+        ["truncated object", '{"server": "lin'],
+        ["not json at all", "not valid json"],
+      ])("keeps the raw string for a malformed payload (%s)", (_label, raw) => {
+        const toolCall = runToolCall("mcp__custom-tools__mcp", [raw]);
+        expect(toolCall.arguments).toBe(raw);
+      });
+
+      /**
+       * Valid JSON that is not an object cannot be tool arguments. It must not
+       * reach pi as a bare null/array/number — and it must not be silently
+       * upgraded to {} either, since that would invent arguments the model
+       * never sent.
+       */
+      it.each([
+        ["null", "null"],
+        ["array", "[]"],
+        ["number", "123"],
+        ["string", '"hello"'],
+      ])("keeps the raw string for non-object JSON (%s)", (_label, raw) => {
+        const toolCall = runToolCall("mcp__custom-tools__mcp", [raw]);
+        expect(toolCall.arguments).toBe(raw);
+      });
+
+      it("keeps a zero-argument call independent from a neighbour with arguments", () => {
+        const bridge = createBridgeWithStart();
+        // index 0: zero-argument mcp status check
+        bridge.handleEvent({
+          type: "content_block_start",
+          index: 0,
+          content_block: {
+            type: "tool_use",
+            id: "toolu_a",
+            name: "mcp__custom-tools__mcp",
+          },
+        });
+        // index 1: a call that does carry arguments
+        bridge.handleEvent({
+          type: "content_block_start",
+          index: 1,
+          content_block: {
+            type: "tool_use",
+            id: "toolu_b",
+            name: "mcp__custom-tools__lookup",
+          },
+        });
+        bridge.handleEvent({
+          type: "content_block_delta",
+          index: 1,
+          delta: {
+            type: "input_json_delta",
+            partial_json: '{"query": "/foo.ts"}',
+          },
+        });
+        bridge.handleEvent({ type: "content_block_stop", index: 0 });
+        bridge.handleEvent({ type: "content_block_stop", index: 1 });
+
+        const ends = stream.events.filter(
+          (e: any) => e.type === "toolcall_end",
+        ) as any[];
+        expect(ends).toHaveLength(2);
+        expect(
+          ends.find((e) => e.toolCall.id === "toolu_a").toolCall.arguments,
+        ).toEqual({});
+        expect(
+          ends.find((e) => e.toolCall.id === "toolu_b").toolCall.arguments,
+        ).toEqual({ query: "/foo.ts" });
+      });
+
+      it("shows {} on the streaming partial before any delta arrives", () => {
+        const bridge = createBridgeWithStart();
+        bridge.handleEvent({
+          type: "content_block_start",
+          index: 0,
+          content_block: {
+            type: "tool_use",
+            id: "toolu_01",
+            name: "mcp__custom-tools__mcp",
+          },
+        });
+        const toolCall = bridge.getOutput().content[0] as any;
+        expect(toolCall.arguments).toEqual({});
+      });
+
+      it("does not let non-object JSON corrupt the partial mid-stream", () => {
+        const bridge = createBridgeWithStart();
+        bridge.handleEvent({
+          type: "content_block_start",
+          index: 0,
+          content_block: {
+            type: "tool_use",
+            id: "toolu_01",
+            name: "mcp__custom-tools__mcp",
+          },
+        });
+        // "null" parses, but is not a valid argument object.
+        bridge.handleEvent({
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "input_json_delta", partial_json: "null" },
+        });
+        const toolCall = bridge.getOutput().content[0] as any;
+        expect(toolCall.arguments).toEqual({});
+      });
+    });
+
     it("getOutput().stopReason is toolUse when stop_reason is tool_use", () => {
       const bridge = createBridgeWithStart();
       bridge.handleEvent({
