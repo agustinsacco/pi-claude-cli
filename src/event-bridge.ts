@@ -4,6 +4,7 @@ import type {
   ClaudeModelUsage,
   ClaudeResultMessage,
   ClaudeUsage,
+  ClaudeUserEnvelope,
   TrackedContentBlock,
 } from "./types";
 import { calculateCost } from "@earendil-works/pi-ai";
@@ -57,6 +58,15 @@ export interface EventBridge {
    */
   handleAssistantEnvelope(envelope: ClaudeAssistantEnvelope): void;
   /**
+   * The `user` envelopes the CLI feeds back between cycles, carrying a
+   * `tool_result` for each CLI-side tool it executed. Dropped unless the
+   * host opts in with PI_CLAUDE_CLI_TOOL_RESULTS=1, in which case each
+   * result becomes a `result` marker paired to its call marker by
+   * tool_use_id — the missing half that lets a front-end render CLI-side
+   * tools as expandable rows instead of fire-and-forget lines.
+   */
+  handleUserEnvelope(envelope: ClaudeUserEnvelope): void;
+  /**
    * Append a pre-built marker text block. Used for sub-agent lifecycle, whose
    * events arrive as top-level `system` envelopes rather than content blocks
    * (`src/task-tracker.ts`). The bridge stays the only writer of
@@ -73,9 +83,6 @@ export interface EventBridge {
 }
 
 /**
- * Map Claude API stop reasons to pi's stop reason format.
- */
-/**
  * Tool arguments are a JSON object or they are nothing.
  *
  * `JSON.parse` happily returns null, arrays, numbers and strings for input
@@ -86,6 +93,49 @@ export interface EventBridge {
 function isArgumentObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+
+/**
+ * Host opt-in for forwarding CLI-side tool results as `result` markers.
+ * Read per call, not at module load, so a host (or a test) can flip it
+ * without re-importing. Off by default: without it the wire format is
+ * byte-identical to what shipped before 0.6.0, because a front-end that
+ * has not learned the id-tagged shapes would render them as prose.
+ */
+function resultForwardingEnabled(): boolean {
+  return process.env.PI_CLAUDE_CLI_TOOL_RESULTS === "1";
+}
+
+/**
+ * Cap on the forwarded result preview. The full output lives in the CLI's
+ * own transcript; this preview exists so a front-end can show "what came
+ * back" without pi's session file growing by megabytes on a 300-tool
+ * session. `length` in the payload always reports the uncapped size.
+ */
+const RESULT_PREVIEW_LIMIT = 2000;
+
+/**
+ * Flatten a tool_result's `content` to text. The CLI sends either a plain
+ * string or an array of blocks; only text blocks contribute (a Read of an
+ * image yields tool_reference/image blocks and an empty preview).
+ */
+function resultText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter(
+      (block): block is { type: "text"; text: string } =>
+        !!block &&
+        typeof block === "object" &&
+        (block as { type?: unknown }).type === "text" &&
+        typeof (block as { text?: unknown }).text === "string",
+    )
+    .map((block) => block.text)
+    .join("\n");
+}
+
+/**
+ * Map Claude API stop reasons to pi's stop reason format.
+ */
 
 function mapStopReason(
   reason: string | undefined,
@@ -170,6 +220,8 @@ export function createEventBridge(
   let lastCycleContext = 0;
   /** Tool ids already surfaced as markers (envelope arrives once per block). */
   const markedToolIds = new Set<string>();
+  /** tool_use_ids whose result marker already went out (CLI dupe guard). */
+  const forwardedResultIds = new Set<string>();
 
   /**
    * Fold per-model spend into one `ClaudeUsage`.
@@ -631,18 +683,59 @@ export function createEventBridge(
       } catch {
         /* unserializable input — marker still names the tool */
       }
-      // WIRE CONTRACT — front-ends parse this string.
+      // WIRE CONTRACT — front-ends parse these strings.
       //
       //   [Claude Code · <ToolName>]              (no arguments)
       //   [Claude Code · <ToolName> <argsJson>]   (preview, may be truncated)
       //
+      // With PI_CLAUDE_CLI_TOOL_RESULTS=1 — a host opt-in, because a
+      // front-end that has not learned these shapes renders them as prose —
+      // the call marker gains an id tag and a result marker follows when the
+      // CLI reports the tool's outcome (`handleUserEnvelope`):
+      //
+      //   [Claude Code · <ToolName> #<toolUseId> <argsJson>]
+      //   [Claude Code · result #<toolUseId> <payloadJson>]
+      //
+      // payloadJson is COMPLETE JSON ({"status":"ok"|"error","preview":…,
+      // "length":…,"truncated"?:true}) — safe to parse, unlike the args
+      // preview, which is truncated here, frequently invalid JSON, and must
+      // never be parsed.
+      //
       // pidex matches /^\[Claude Code · ([^\s\]]+)(?:\s+([\s\S]*))?\]$/ to
       // render these as activity rows instead of prose; anything it cannot
       // match falls back to being shown as raw markdown, which is what this
-      // marker existed to avoid. Change the shape only together with the
-      // consumers, and keep the argument preview opaque — it is truncated
-      // here, so it is frequently invalid JSON and must never be parsed.
-      appendTextBlock(`[Claude Code · ${block.name}${argsPreview}]`);
+      // marker existed to avoid. Change the shapes only together with the
+      // consumers.
+      const idTag = resultForwardingEnabled() ? ` #${block.id}` : "";
+      appendTextBlock(`[Claude Code · ${block.name}${idTag}${argsPreview}]`);
+    }
+  }
+
+  function handleUserEnvelope(envelope: ClaudeUserEnvelope): void {
+    if (!resultForwardingEnabled()) return;
+    // Sub-agent envelopes are the CLI's internal business, same as in
+    // handleAssistantEnvelope.
+    if (envelope.parent_tool_use_id) return;
+    for (const block of envelope.message?.content ?? []) {
+      if (block.type !== "tool_result" || !block.tool_use_id) continue;
+      // Only results for tools that got a call marker. Everything else is
+      // either a handoff replay (pi executed it and has the real result —
+      // rendering it again would double it) or noise from an envelope this
+      // bridge never saw.
+      if (!markedToolIds.has(block.tool_use_id)) continue;
+      if (forwardedResultIds.has(block.tool_use_id)) continue;
+      forwardedResultIds.add(block.tool_use_id);
+
+      const text = resultText(block.content);
+      const payload: Record<string, unknown> = {
+        status: block.is_error ? "error" : "ok",
+        preview: text.slice(0, RESULT_PREVIEW_LIMIT),
+        length: text.length,
+      };
+      if (text.length > RESULT_PREVIEW_LIMIT) payload.truncated = true;
+      appendTextBlock(
+        `[Claude Code · result #${block.tool_use_id} ${JSON.stringify(payload)}]`,
+      );
     }
   }
 
@@ -692,6 +785,7 @@ export function createEventBridge(
   return {
     handleEvent,
     handleAssistantEnvelope,
+    handleUserEnvelope,
     appendMarker: appendTextBlock,
     applyResult,
     getOutput: () => output,
