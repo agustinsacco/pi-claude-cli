@@ -75,6 +75,18 @@ export interface EventBridge {
 /**
  * Map Claude API stop reasons to pi's stop reason format.
  */
+/**
+ * Tool arguments are a JSON object or they are nothing.
+ *
+ * `JSON.parse` happily returns null, arrays, numbers and strings for input
+ * that is valid JSON but cannot be a tool's arguments. Passing any of those
+ * to pi fails its schema check, and `null` in particular breaks
+ * `translateClaudeArgsToPi`, which calls `Object.entries` on it.
+ */
+function isArgumentObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function mapStopReason(
   reason: string | undefined,
 ): "stop" | "length" | "toolUse" {
@@ -452,8 +464,15 @@ export function createEventBridge(
       if (block.type !== "tool_use") return;
       block.partialJson += event.delta!.partial_json;
       try {
-        block.arguments = JSON.parse(block.partialJson);
-        (output.content[block.contentIndex] as any).arguments = block.arguments;
+        const parsed = JSON.parse(block.partialJson);
+        // Only an object may overwrite the arguments. A payload that parses
+        // to null/array/scalar would otherwise land on the streaming partial
+        // and be shown to the user as the tool's arguments.
+        if (isArgumentObject(parsed)) {
+          block.arguments = parsed;
+          (output.content[block.contentIndex] as any).arguments =
+            block.arguments;
+        }
       } catch {
         // Partial JSON not yet parseable -- keep previous arguments
       }
@@ -515,13 +534,30 @@ export function createEventBridge(
         partial: output,
       });
     } else if (block.type === "tool_use") {
-      // Final JSON parse with fallback to raw string
+      // Arguments stream in as input_json_delta events. A call with NO
+      // arguments -- mcp({}), artifact_list() -- sends no deltas at all, so
+      // the accumulator is still "" here. JSON.parse("") throws, and handing
+      // pi the raw "" made it reject the call against the tool's schema with
+      // `root: must be object`. Empty means {}, not malformed: that is the
+      // difference between "the model sent no arguments" and "the arguments
+      // did not arrive intact".
+      //
+      // Anything that is non-empty but unusable still passes through as its
+      // raw string, on purpose. That text is the only evidence of what
+      // actually arrived, and coercing it to {} would turn a visible failure
+      // into a tool that silently ran with no arguments.
       let finalArgs: Record<string, unknown> | string;
-      try {
-        const parsed = JSON.parse(block.partialJson);
-        finalArgs = translateClaudeArgsToPi(block.claudeName, parsed);
-      } catch {
-        finalArgs = block.partialJson;
+      if (block.partialJson.trim() === "") {
+        finalArgs = translateClaudeArgsToPi(block.claudeName, {});
+      } else {
+        try {
+          const parsed = JSON.parse(block.partialJson);
+          finalArgs = isArgumentObject(parsed)
+            ? translateClaudeArgsToPi(block.claudeName, parsed)
+            : block.partialJson;
+        } catch {
+          finalArgs = block.partialJson;
+        }
       }
 
       (output.content[block.contentIndex] as any).arguments = finalArgs;

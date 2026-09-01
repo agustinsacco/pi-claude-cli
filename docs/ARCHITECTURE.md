@@ -376,6 +376,34 @@ transcript, and the model eventually imitates it — observed in production
 as sessions silently dying mid-task. SIGKILL remains only as the abort
 backstop (2s after an interrupt) and the post-result reaper.
 
+### Empty arguments are `{}`, malformed arguments are the raw text
+
+A handoff tool's arguments arrive as `input_json_delta` events and accumulate
+into `partialJson`. A call with **no** arguments — `mcp({})`,
+`artifact_list()` — produces no deltas at all, so the accumulator is still the
+empty string when `content_block_stop` lands.
+
+`event-bridge.ts` therefore treats empty and malformed as two different
+things:
+
+| accumulated payload                        | forwarded to pi                       |
+| ------------------------------------------ | ------------------------------------- |
+| `""` or whitespace                         | `{}`                                  |
+| valid JSON object                          | the parsed object, after arg renaming |
+| valid JSON non-object (`null`, `[]`, `12`) | the raw string                        |
+| unparseable (truncated stream)             | the raw string                        |
+
+The empty case must not fall into the parse-failure branch. `JSON.parse("")`
+throws, and forwarding the raw `""` makes pi reject the call against the
+tool's schema with `root: must be object` — which silently killed every
+zero-argument handoff tool, including `mcp({})`, the documented first step for
+checking MCP status.
+
+The reverse is equally deliberate: a **non-empty** payload that cannot be used
+is passed through as its raw string rather than coerced to `{}`. That text is
+the only evidence of what actually arrived, and blanking it would turn a
+visible failure into a tool that silently ran with no arguments.
+
 ## Session model: one CLI session per pi session
 
 pi's session JSONL is the **only** authoritative record; the CLI session is
