@@ -111,6 +111,33 @@ accounting.
 Related knobs: `PI_CLAUDE_CLI_TIMEOUT_MS` overrides the 300s inactivity
 timeout (CLI-side tools can be silent on stdout for minutes).
 
+### Tool result forwarding
+
+In observer mode the CLI executes its own tools, and pi's transcript records
+each one as a marker text block — `[Claude Code · Bash {"command":…}]` — with
+**no result**. A front-end can show what was invoked but never what came back,
+so its tool rows have nothing to expand into.
+
+`PI_CLAUDE_CLI_TOOL_RESULTS=1` forwards the results. Two richer marker shapes
+go on the wire, paired by `tool_use_id`:
+
+```
+[Claude Code · <ToolName> #<toolUseId> <argsJson>]   ← call, now id-tagged
+[Claude Code · result #<toolUseId> <payloadJson>]    ← its result
+```
+
+`payloadJson` is complete, parseable JSON:
+`{"status":"ok"|"error","preview":string,"length":number,"truncated"?:true}`.
+The preview is capped at 2,000 characters (`length` always reports the full
+size); the full output remains in the CLI's own transcript. Results are only
+forwarded for tools that produced a call marker — handoff tools are executed
+by pi, which already has their real result, and their replayed `tool_result`
+envelopes are ignored.
+
+This is a host **opt-in** because it changes the marker wire contract: a
+front-end that has not learned the id-tagged shapes would render them as
+prose. Leave it unset and the wire format is byte-identical to pre-0.6.0.
+
 ### Auto-compact window
 
 The provider resumes **one** CLI session for a pi session's whole life, and

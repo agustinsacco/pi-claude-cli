@@ -477,7 +477,11 @@ export function streamViaCli(
           // mode is every tool except handoffs.
           if (!selfInterrupted) bridge.handleAssistantEnvelope(msg as any);
         } else if (msg.type === "user") {
-          // Tool results the CLI feeds back between cycles — internal.
+          // Tool results the CLI feeds back between cycles. Internal by
+          // default; with PI_CLAUDE_CLI_TOOL_RESULTS=1 the bridge forwards
+          // each one as a `result` marker paired to its call marker. Frozen
+          // after a handoff interrupt like every other content path.
+          if (!selfInterrupted) bridge.handleUserEnvelope(msg as any);
         } else if (msg.type === "control_request") {
           handleControlRequest(msg, proc!.stdin!);
         } else if (msg.type === "result") {

@@ -246,13 +246,20 @@ often enough that consumers must treat it as a display string.
 
 ### Not yet surfaced (extension seams)
 
-Two things the CLI reports that this bridge deliberately drops. Both are the
-natural starting points if a front-end ever wants richer Claude-Code-side UX:
+One thing the CLI reports is forwarded only on opt-in, and one is still
+dropped:
 
-- **Results of CLI-side tools.** The `user` envelopes between cycles carry
-  `tool_result` blocks for tools the CLI executed itself. `provider.ts`
-  ignores them, so markers show _what was invoked_ but never what came back.
-  Surfacing them means pairing each result with its `tool_use_id`.
+- **Results of CLI-side tools — forwarded when `PI_CLAUDE_CLI_TOOL_RESULTS=1`.**
+  The `user` envelopes between cycles carry `tool_result` blocks for tools the
+  CLI executed itself. With the flag set, the call marker gains a
+  `#<toolUseId>` tag and each result becomes a
+  `[Claude Code · result #<toolUseId> {payload}]` marker
+  (`handleUserEnvelope`), letting a front-end pair them and render CLI-side
+  tools as expandable rows. The payload is complete JSON — status, a capped
+  preview, the full length — and only ids that produced a call marker are
+  forwarded, so a handoff tool's replayed result (pi already has the real
+  one) never renders twice. Without the flag the wire is unchanged: the
+  id-tagged shapes are a contract change a consumer must know how to parse.
 - **Sub-agent transcripts.** What a sub-agent actually did — its own tool
   calls and text — arrives with `parent_tool_use_id` set and is still
   filtered out in both `provider.ts` and `handleAssistantEnvelope`. Those

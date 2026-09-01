@@ -787,3 +787,112 @@ describe("waiting for background sub-agents", () => {
     expect(proc.kill).toHaveBeenCalledWith("SIGKILL");
   });
 });
+
+/**
+ * Provider-level pass over the SAME captured episode with result forwarding
+ * on: proves the `user` envelope branch in provider.ts reaches the bridge,
+ * and that the real fixture's two tool_results (one ok with only a
+ * tool_reference block, one is_error string) come out as paired markers.
+ */
+describe("tool result forwarding through the provider (PI_CLAUDE_CLI_TOOL_RESULTS)", () => {
+  const FLAG = "PI_CLAUDE_CLI_TOOL_RESULTS";
+  let saved: string | undefined;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+    saved = process.env[FLAG];
+    process.env[FLAG] = "1";
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    if (saved === undefined) delete process.env[FLAG];
+    else process.env[FLAG] = saved;
+  });
+
+  async function runEpisode(): Promise<any> {
+    streamViaCli(model, { messages: [{ role: "user", content: "go" }] });
+    await vi.advanceTimersByTimeAsync(0);
+    const proc = (spawn as any).mock.results[0].value;
+    for (const line of EPISODE.split("\n")) {
+      if (line.trim()) proc.stdout.write(line + "\n");
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    proc.stdout.end();
+    proc.emit("exit", 0);
+    await vi.advanceTimersByTimeAsync(0);
+    const mockStream = MockAssistantMessageEventStream.mock.instances[0];
+    const done = mockStream._events.find((e: any) => e.type === "done");
+    expect(done).toBeDefined();
+    return done.message;
+  }
+
+  it("pairs each fixture result to its id-tagged call marker", async () => {
+    const message = await runEpisode();
+    const texts = message.content
+      .filter((c: any) => c.type === "text")
+      .map((c: any) => c.text);
+
+    // Call markers now carry the ids the fixture really used.
+    expect(
+      texts.some((t: string) =>
+        t.startsWith(
+          "[Claude Code · ToolSearch #toolu_0184T4PXjC3DYpy1wRRZ1A9j",
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      texts.some((t: string) =>
+        t.startsWith(
+          "[Claude Code · WebSearch #toolu_01WaqWQ9mT68TCvVkQf9ddGv",
+        ),
+      ),
+    ).toBe(true);
+
+    // ToolSearch's result content is a lone tool_reference block: an ok
+    // result with an empty preview, not a dropped one.
+    const toolSearchResult = texts.find((t: string) =>
+      t.startsWith("[Claude Code · result #toolu_0184T4PXjC3DYpy1wRRZ1A9j"),
+    );
+    expect(toolSearchResult).toBeDefined();
+    const tsPayload = JSON.parse(
+      /^\[Claude Code · result #\S+ (.*)\]$/s.exec(toolSearchResult!)![1]!,
+    );
+    expect(tsPayload).toEqual({ status: "ok", preview: "", length: 0 });
+
+    // WebSearch's result is a real is_error string.
+    const webSearchResult = texts.find((t: string) =>
+      t.startsWith("[Claude Code · result #toolu_01WaqWQ9mT68TCvVkQf9ddGv"),
+    );
+    expect(webSearchResult).toBeDefined();
+    const wsPayload = JSON.parse(
+      /^\[Claude Code · result #\S+ (.*)\]$/s.exec(webSearchResult!)![1]!,
+    );
+    expect(wsPayload.status).toBe("error");
+    expect(wsPayload.preview).toContain("haven't granted it yet");
+
+    // Each result marker sits AFTER its call marker.
+    const callIdx = texts.findIndex((t: string) =>
+      t.startsWith("[Claude Code · WebSearch #"),
+    );
+    const resultIdx = texts.findIndex((t: string) =>
+      t.startsWith("[Claude Code · result #toolu_01WaqWQ9mT68TCvVkQf9ddGv"),
+    );
+    expect(resultIdx).toBeGreaterThan(callIdx);
+  });
+
+  it("changes nothing when the flag is off", async () => {
+    delete process.env[FLAG];
+    const message = await runEpisode();
+    const texts = message.content
+      .filter((c: any) => c.type === "text")
+      .map((c: any) => c.text);
+    expect(texts.some((t: string) => t.includes("· result #"))).toBe(false);
+    expect(texts.some((t: string) => t.includes(" #toolu_"))).toBe(false);
+    // The historical shape, exactly.
+    expect(
+      texts.some((t: string) => t.startsWith("[Claude Code · ToolSearch {")),
+    ).toBe(true);
+  });
+});
