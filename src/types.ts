@@ -194,6 +194,8 @@ export interface ClaudeControlRequest {
     subtype: "can_use_tool";
     tool_name: string;
     input: Record<string, unknown>;
+    /** Claude Code 2.x: the assistant tool_use block this permission is for. */
+    tool_use_id?: string;
   };
 }
 

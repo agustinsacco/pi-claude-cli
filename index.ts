@@ -16,9 +16,11 @@ import {
 } from "./src/process-manager.js";
 import {
   getCustomToolDefs,
-  writeMcpConfig,
+  writeSchemaFile,
   cleanupMcpConfigFiles,
 } from "./src/mcp-config.js";
+import { startHandoffBroker, stopHandoffBroker } from "./src/handoff-broker.js";
+import { retireAllCliProcesses } from "./src/cli-process.js";
 import { rewriteOverflowMessage } from "./src/overflow.js";
 import { buildRateLimitPayload, rateLimitIdentity } from "./src/rate-limit.js";
 import type { TaskTrackerState } from "./src/types.js";
@@ -27,6 +29,13 @@ import type { TaskTrackerState } from "./src/types.js";
 process.on("exit", killAllProcesses);
 // Remove the schema/config temp files this process staged in tmpdir
 process.on("exit", cleanupMcpConfigFiles);
+// Close the handoff socket and remove its file
+process.on("exit", stopHandoffBroker);
+// Parked CLI processes hold their stdin from us: ending pi ends them (the
+// pipe closes and the CLI exits), but retire cleanly when we can.
+process.on("beforeExit", () => {
+  void retireAllCliProcesses();
+});
 
 const PROVIDER_ID = "pi-claude-cli";
 
@@ -100,43 +109,48 @@ function publishTaskProgress(state: TaskTrackerState): void {
   }
 }
 
-let mcpConfigPath: string | undefined;
+/** Last staged schema, handed to every spawn; undefined until pi's registry is up. */
+let mcpSchema: { schemaPath: string; version: number } | undefined;
 
 /**
- * Generate the MCP config on first request, then keep it in step with pi's
- * tool registry. Not done at load time: pi.getAllTools() fails while
- * extensions are still loading.
+ * Stage pi's custom-tool schemas on first request, then keep them in step
+ * with pi's tool registry. Not done at load time: pi.getAllTools() fails
+ * while extensions are still loading.
  *
  * Re-checked on EVERY request rather than locked after the first. pi packages
  * register and unregister tools at runtime — pi-mcp-adapter re-registers its
  * `mcp` gateway with a fresh description whenever an MCP server is added,
  * enabled or disabled — and a locked snapshot left the CLI advertising a
- * turn-1 tool surface for the whole session. writeMcpConfig only touches disk
- * when the surface actually changed, so the steady-state cost is one
+ * turn-1 tool surface for the whole session. writeSchemaFile only touches
+ * disk when the surface actually changed, so the steady-state cost is one
  * getAllTools() call and a string compare.
  *
- * The CLI reads --mcp-config at spawn and the provider spawns per turn, so a
- * mid-session change lands on the NEXT turn, not the one in flight.
+ * The CLI reads the schema through --mcp-config at spawn, so a mid-session
+ * change lands on the next spawn: the version bump retires a parked process
+ * (its tool list is what it advertised at connect time) and the next call
+ * resumes the CLI session in a fresh process.
  *
  * Uses warn-don't-block: failure logs a warning but does not
  * prevent the provider from functioning (built-ins still work).
  */
-function ensureMcpConfig(pi: ExtensionAPI): string | undefined {
+function ensureMcpSchema(
+  pi: ExtensionAPI,
+): { schemaPath: string; version: number } | undefined {
   try {
     const allTools = pi.getAllTools();
 
     // Registry not ready yet — retry on the next call
     if (!Array.isArray(allTools)) {
-      return mcpConfigPath;
+      return mcpSchema;
     }
 
     const toolDefs = getCustomToolDefs(pi);
     if (toolDefs.length === 0) {
-      return mcpConfigPath;
+      return mcpSchema;
     }
 
-    const { configPath, changed } = writeMcpConfig(toolDefs);
-    mcpConfigPath = configPath;
+    const { schemaPath, changed, version } = writeSchemaFile(toolDefs);
+    mcpSchema = { schemaPath, version };
     if (changed) {
       console.error(
         `[pi-claude-cli] MCP config generated with ${toolDefs.length} custom tool(s)`,
@@ -148,7 +162,28 @@ function ensureMcpConfig(pi: ExtensionAPI): string | undefined {
       err,
     );
   }
-  return mcpConfigPath;
+  return mcpSchema;
+}
+
+/**
+ * The handoff socket the schema server calls back into. Started once, on the
+ * first turn; a failure to bind logs once and leaves proxied handoffs off (the
+ * provider then falls back to interrupt-and-resume for custom tools).
+ */
+let handoffSocket: string | undefined;
+let handoffSocketAttempted = false;
+async function ensureHandoffSocket(): Promise<string | undefined> {
+  if (handoffSocket || handoffSocketAttempted) return handoffSocket;
+  handoffSocketAttempted = true;
+  try {
+    handoffSocket = await startHandoffBroker();
+  } catch (err) {
+    console.warn(
+      "[pi-claude-cli] handoff socket unavailable, custom tools fall back to interrupt-and-resume:",
+      err,
+    );
+  }
+  return handoffSocket;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -190,10 +225,14 @@ export default function (pi: ExtensionAPI) {
       context: Parameters<typeof streamViaCli>[1],
       options?: Parameters<typeof streamViaCli>[2],
     ) => {
-      const configPath = ensureMcpConfig(pi);
+      const schema = ensureMcpSchema(pi);
+      // The socket start is async; the provider awaits it inside its own
+      // driver so streamSimple still returns the stream synchronously.
       return streamViaCli(model, context, {
         ...options,
-        mcpConfigPath: configPath,
+        mcpConfig: schema
+          ? { ...schema, handoffSocket: ensureHandoffSocket() }
+          : undefined,
         onRateLimit: publishRateLimit,
         onTaskProgress: publishTaskProgress,
       });

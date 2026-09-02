@@ -42,8 +42,13 @@ Requires the `claude` binary on your login-shell PATH (`npm install -g @anthropi
 
 - Streams text, thinking, and tool call tokens in real-time
 - Maps tool names and arguments bidirectionally between Claude and pi
-- Exposes custom pi tools to Claude via MCP (schema-only, no execution)
-- Break-early pattern prevents Claude CLI from auto-executing tools
+- Exposes custom pi tools to Claude via MCP; the schema server proxies each
+  call back to pi over a local socket, so the CLI never has to be interrupted
+  to let pi run a tool
+- One CLI **process** per pi session (0.7.0): it lives through custom-tool
+  handoffs and across turns, so Claude Code builds its system prompt — git
+  snapshot included — once per session rather than once per call. A commit
+  or branch rename between turns no longer re-bills the whole context
 - One CLI session per pi session (sidecar-mapped), resumed on every follow-up turn — native caching, no history replay
 - Native tool execution: the CLI runs its own tools; guards are injected as Claude Code PreToolUse hooks via `PI_CLAUDE_CLI_SETTINGS`
 - Reports account rate-limit state (window, reset, overage) to the front-end
@@ -137,6 +142,43 @@ envelopes are ignored.
 This is a host **opt-in** because it changes the marker wire contract: a
 front-end that has not learned the id-tagged shapes would render them as
 prose. Leave it unset and the wire format is byte-identical to pre-0.6.0.
+
+### Persistent CLI process
+
+Before 0.7.0 every pi call was its own `claude -p` process: a custom-tool
+handoff denied the permission, interrupted the CLI, ran the tool in pi and
+`--resume`d a new process with the result pasted in as text; every user turn
+started another. Each new process rebuilt Claude Code's system prompt, and
+that prompt snapshots `git status`, the recent commits and the branch. So a
+commit, a branch rename or a new untracked file between two processes
+re-billed the **entire** context as cache write — measured 2026-09-01 on one
+session: 64k, 106k and 190k tokens on three separate restarts, 1.87M tokens
+across three sessions that day. The restart also left `tool use was
+rejected` / `[Request interrupted]` / `No response requested.` filler in the
+CLI transcript on every custom tool call.
+
+Now the process stays up. A custom tool call is **allowed** and proxied: the
+schema-only MCP server forwards `tools/call` to pi over a local socket, pi
+runs the tool, and the next pi call answers the CLI on the same process — its
+transcript records a real `tool_result`. After a turn ends the process is
+parked and the next user message goes to the same stdin. Measured live
+(`tests/live-persistent.test.ts`): a turn after a commit costs 91 cache-write
+tokens on the persistent process versus 8,827 on a fresh one.
+
+| Variable                        | Default   | Meaning                                                                                                                                    |
+| ------------------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `PI_CLAUDE_CLI_KEEPALIVE_MS`    | `600000`  | How long a parked process waits for the next turn. `0`/`off`: end it at `result` as before (handoffs still keep it alive within a turn).   |
+| `PI_CLAUDE_CLI_HANDOFF_WAIT_MS` | `1800000` | Ceiling on a process blocked in a handoff that pi never answers (aborted tool, crashed host); it is interrupted and retired when it fires. |
+| `PI_CLAUDE_CLI_HANDOFF_PROXY`   | on        | `0` restores interrupt-and-resume for custom tools (the MCP server then answers `tools/call` with an error result).                        |
+| `MCP_TOOL_TIMEOUT`              | `3600000` | Passed to the CLI when unset: a proxied call blocks until pi has run the tool, and sub-agents take minutes.                                |
+
+A parked process is retired — cleanly, never mid-turn — when the next call
+does not match it: a different model or effort, a changed system-prompt
+mode, a rewritten tool schema (a new MCP server connected), a pi history the
+CLI never saw, or a delta that is not exactly the awaited tool results. The
+next call then `--resume`s the CLI session in a fresh process, exactly as
+every call did before. Ending pi ends its parked processes: their stdin is a
+pipe from pi, and the CLI exits on EOF.
 
 ### Auto-compact window
 

@@ -53,6 +53,7 @@ vi.mock("@earendil-works/pi-ai/providers/all", () => ({
 
 import spawn from "cross-spawn";
 import { streamViaCli } from "../src/provider";
+import { resetCliProcessesForTests } from "../src/cli-process";
 
 const model = {
   id: "claude-haiku-4-5",
@@ -83,6 +84,7 @@ const EPISODE = readFileSync(
 
 describe("multi-cycle episodes (issue #3)", () => {
   beforeEach(() => {
+    resetCliProcessesForTests();
     vi.useFakeTimers();
     vi.clearAllMocks();
   });
@@ -312,6 +314,7 @@ describe("multi-cycle episodes (issue #3)", () => {
 
 describe("sub-agent visibility (#23)", () => {
   beforeEach(() => {
+    resetCliProcessesForTests();
     vi.useFakeTimers();
     vi.clearAllMocks();
   });
@@ -465,6 +468,7 @@ describe("sub-agent visibility (#23)", () => {
 
 describe("rate limit forwarding (account state, not turn content)", () => {
   beforeEach(() => {
+    resetCliProcessesForTests();
     vi.useFakeTimers();
     vi.clearAllMocks();
   });
@@ -566,6 +570,7 @@ describe("rate limit forwarding (account state, not turn content)", () => {
  */
 describe("waiting for background sub-agents", () => {
   beforeEach(() => {
+    resetCliProcessesForTests();
     vi.useFakeTimers();
     vi.clearAllMocks();
     delete process.env.PI_CLAUDE_CLI_NO_AGENT_WAIT;
@@ -799,6 +804,7 @@ describe("tool result forwarding through the provider (PI_CLAUDE_CLI_TOOL_RESULT
   let saved: string | undefined;
 
   beforeEach(() => {
+    resetCliProcessesForTests();
     vi.useFakeTimers();
     vi.clearAllMocks();
     saved = process.env[FLAG];

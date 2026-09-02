@@ -190,3 +190,32 @@ describe("control-handler", () => {
     });
   });
 });
+
+describe("handleControlRequest with the handoff proxy", () => {
+  it("allows custom tools when allowHandoff is set, passing the input through", () => {
+    const { stream, chunks } = createMockStdin();
+    const ok = handleControlRequest(
+      makeControlRequest("mcp__custom-tools__deploy", "r9", { env: "prod" }),
+      stream,
+      { allowHandoff: true },
+    );
+    expect(ok).toBe(true);
+    const parsed = JSON.parse(chunks.join("").trim());
+    expect(parsed.response.response).toEqual({
+      behavior: "allow",
+      updatedInput: { env: "prod" },
+    });
+  });
+
+  it("still denies custom tools without the flag", () => {
+    const { stream, chunks } = createMockStdin();
+    const ok = handleControlRequest(
+      makeControlRequest("mcp__custom-tools__deploy"),
+      stream,
+    );
+    expect(ok).toBe(false);
+    expect(JSON.parse(chunks.join("").trim()).response.response.behavior).toBe(
+      "deny",
+    );
+  });
+});

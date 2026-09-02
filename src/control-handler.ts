@@ -4,7 +4,10 @@
  * Processes control_request messages from Claude CLI stdout and writes
  * control_response messages to stdin.
  *
- * - Custom MCP tools (mcp__custom-tools__*): DENIED — pi executes these
+ * - Custom MCP tools (mcp__custom-tools__*): ALLOWED when the handoff proxy is
+ *   on — the schema server forwards the call to pi and the CLI keeps running;
+ *   DENIED otherwise, so the legacy interrupt-and-resume handoff can run the
+ *   tool in pi.
  * - Everything else (user MCP tools, internal tools): ALLOWED — Claude handles
  */
 
@@ -39,14 +42,14 @@ interface ControlResponse {
 /**
  * Handle a control_request from the Claude CLI.
  *
- * Denies custom MCP tools (mcp__custom-tools__*) so pi can execute them.
- * Allows everything else (user MCP tools, internal Claude tools).
- *
+ * @param options.allowHandoff - true when a handoff proxy will execute custom
+ *   tools in pi; false (default) denies them so the interrupt path runs them.
  * @returns true if the tool was allowed, false if denied
  */
 export function handleControlRequest(
   msg: ClaudeControlRequest,
   stdin: NodeJS.WritableStream,
+  options?: { allowHandoff?: boolean },
 ): boolean {
   if (!msg.request_id || !msg.request) {
     console.error(
@@ -58,18 +61,19 @@ export function handleControlRequest(
 
   const toolName = msg.request?.tool_name ?? "";
   const isCustomTool = toolName.startsWith(CUSTOM_TOOLS_MCP_PREFIX);
+  const deny = isCustomTool && !options?.allowHandoff;
 
   const response: ControlResponse = {
     type: "control_response",
     response: {
       subtype: "success",
       request_id: msg.request_id,
-      response: isCustomTool
+      response: deny
         ? { behavior: "deny", message: TOOL_EXECUTION_DENIED_MESSAGE }
         : { behavior: "allow", updatedInput: msg.request?.input ?? {} },
     },
   };
 
   stdin.write(JSON.stringify(response) + "\n");
-  return !isCustomTool;
+  return !deny;
 }

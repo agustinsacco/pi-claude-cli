@@ -164,6 +164,7 @@ function mapStopReason(
 export function createEventBridge(
   stream: AssistantMessageEventStream,
   model: Model<any>,
+  options?: { markedToolIds?: Set<string> },
 ): EventBridge {
   // Tracked content blocks indexed by Claude's content_block index
   const blocks: TrackedBlock[] = [];
@@ -219,7 +220,10 @@ export function createEventBridge(
    */
   let lastCycleContext = 0;
   /** Tool ids already surfaced as markers (envelope arrives once per block). */
-  const markedToolIds = new Set<string>();
+  // Shared across the episodes of one CLI process when the caller passes a
+  // set: a built-in tool called in one episode may report its result in the
+  // next (the process kept running through a proxied handoff).
+  const markedToolIds = options?.markedToolIds ?? new Set<string>();
   /** tool_use_ids whose result marker already went out (CLI dupe guard). */
   const forwardedResultIds = new Set<string>();
 

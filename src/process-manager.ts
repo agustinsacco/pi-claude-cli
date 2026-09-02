@@ -52,6 +52,9 @@ function isStrictMcp(): boolean {
  * Where a spawn's system prompt is staged. Scoped to the CLI session so
  * concurrent turns in one pi process cannot clobber each other.
  */
+/** One hour: the MCP tool-call timeout handed to the CLI when unset. */
+export const DEFAULT_MCP_TOOL_TIMEOUT_MS = 3_600_000;
+
 function systemPromptFilePath(sessionKey?: string): string {
   const suffix = sessionKey ? `-${sessionKey}` : "";
   return join(tmpdir(), `pi-claude-cli-sysprompt-${process.pid}${suffix}.txt`);
@@ -178,9 +181,19 @@ export function spawnClaude(
     args.push("--autocompact", autocompact);
   }
 
+  // Proxied custom tools block inside the CLI's MCP client until pi has run
+  // the tool (src/handoff-broker.ts). Sub-agents and long shell tools take
+  // minutes, so unless the host set its own limit, give the MCP client an
+  // hour before it gives up on a call. Config, not context: it never touches
+  // the prompt cache.
+  const env = { ...process.env };
+  if (!env.MCP_TOOL_TIMEOUT)
+    env.MCP_TOOL_TIMEOUT = String(DEFAULT_MCP_TOOL_TIMEOUT_MS);
+
   const proc = spawn("claude", args, {
     stdio: ["pipe", "pipe", "pipe"],
     cwd: options?.cwd ?? process.cwd(),
+    env,
   });
 
   return proc as ChildProcess;

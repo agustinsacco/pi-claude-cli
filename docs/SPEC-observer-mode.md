@@ -159,3 +159,19 @@ Live (`scripts/e2e-live.sh`, spends tokens, not CI): multi-tool native task
 completes; resume across pi restarts recalls prior turns with cache_write
 < 1k; steer mid-turn; guard hook blocks an outside read; custom-tool handoff
 round-trip; zero `No response requested` in the CLI session file.
+
+## Addendum (0.7.0): the process outlives the call
+
+Everything above about _how_ a handoff ends the turn for pi still holds:
+`stopReason: toolUse` only for `mcp__custom-tools__*`, no toolResult messages
+in pi's stream, the CLI never SIGKILLed mid-turn. What changed is that the
+CLI process no longer ends with the pi call. The handoff permission is
+**allowed**, the schema server proxies `tools/call` to pi over a local socket
+(`src/handoff-broker.ts`), and the next pi call answers it on the same
+process; after `result` the process is parked for the next user turn
+(`src/cli-process.ts`). The `interrupt` at message_stop is now the fallback
+(`PI_CLAUDE_CLI_HANDOFF_PROXY=0`, or no pi session id), and `--resume` into a
+fresh process is what happens when a parked process cannot take the next call.
+The reason is in `docs/ARCHITECTURE.md` → "One process per pi session":
+every fresh process rebuilt a system prompt containing a git snapshot, and any
+commit or branch rename in between re-billed the whole context.
