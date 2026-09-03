@@ -237,6 +237,15 @@ export class CliProcess implements HandoffTarget {
     writeUserMessage(this.proc, prompt);
   }
 
+  /**
+   * The episode decided a `result` was not the end of the turn (the CLI
+   * answered a queued prompt of its own, or sub-agents are still running):
+   * the turn is live again for the process.
+   */
+  resumeTurn(): void {
+    if (this.alive && !this.retired) this.turnActive = true;
+  }
+
   // ---- handoff bookkeeping ------------------------------------------------
 
   /** A handoff tool_use block streamed in the current assistant message. */

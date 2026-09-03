@@ -2,6 +2,14 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+/** A fresh socket address per test: a unix socket, or a named pipe on Windows. */
+function testSocketPath(tag: string): string {
+  const name = `pcc-broker-${tag}-${process.pid}-${Date.now()}`;
+  return process.platform === "win32"
+    ? `\\\\.\\pipe\\${name}`
+    : join(tmpdir(), `${name}.sock`);
+}
 import {
   dispatchHandoffCall,
   registerHandoffTarget,
@@ -86,11 +94,7 @@ describe("handoff broker", () => {
   });
 
   it("serves the wire protocol over the socket: one NDJSON call, one NDJSON result", async () => {
-    if (process.platform === "win32") return;
-    const path = join(
-      tmpdir(),
-      `pcc-broker-test-${process.pid}-${Date.now()}.sock`,
-    );
+    const path = testSocketPath("test");
     const socketPath = await startHandoffBroker(path);
     expect(socketPath).toBe(path);
     registerHandoffTarget("s1", {
@@ -128,11 +132,7 @@ describe("handoff broker", () => {
   });
 
   it("answers a malformed request with an error", async () => {
-    if (process.platform === "win32") return;
-    const path = join(
-      tmpdir(),
-      `pcc-broker-bad-${process.pid}-${Date.now()}.sock`,
-    );
+    const path = testSocketPath("bad");
     await startHandoffBroker(path);
     const reply = await new Promise<string>((resolve, reject) => {
       const sock = connect(path);

@@ -63,8 +63,11 @@ describe("mcp-schema-server.cjs", () => {
         },
       ]),
     );
-    if (process.platform !== "win32") {
-      sockPath = join(dir, "broker.sock");
+    {
+      sockPath =
+        process.platform === "win32"
+          ? `\\\\.\\pipe\\pcc-schema-${process.pid}-${Date.now()}`
+          : join(dir, "broker.sock");
       broker = createServer((socket) => {
         let b = "";
         socket.setEncoding("utf8");
@@ -128,7 +131,6 @@ describe("mcp-schema-server.cjs", () => {
   });
 
   it("with a socket, tools/call is forwarded to pi with the session and tool_use id, and the result relayed", async () => {
-    if (process.platform === "win32") return;
     const proc = spawn("node", [SERVER, schemaPath, sockPath, "cli-sess-42"], {
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -156,14 +158,13 @@ describe("mcp-schema-server.cjs", () => {
   });
 
   it("a dead socket yields an error result rather than a hang", async () => {
-    if (process.platform === "win32") return;
-    const proc = spawn(
-      "node",
-      [SERVER, schemaPath, join(dir, "nope.sock"), "cli-x"],
-      {
-        stdio: ["pipe", "pipe", "pipe"],
-      },
-    );
+    const dead =
+      process.platform === "win32"
+        ? `\\\\.\\pipe\\pcc-nope-${process.pid}-${Date.now()}`
+        : join(dir, "nope.sock");
+    const proc = spawn("node", [SERVER, schemaPath, dead, "cli-x"], {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
     try {
       const call = rpc(proc);
       const res = await call("tools/call", { name: "search", arguments: {} });
