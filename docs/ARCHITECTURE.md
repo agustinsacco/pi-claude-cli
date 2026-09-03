@@ -652,6 +652,7 @@ fires, and the turn looks truncated. This was the root cause behind every
 | 0.5.1   | `PI_CLAUDE_CLI_STRICT_MCP`; the tool schema follows pi's registry instead of freezing at turn 1                                                                                                                       |
 | 0.5.2   | A tool call with no arguments reaches pi as `{}`                                                                                                                                                                      |
 | 0.6.0   | CLI-side tool results forwarded as paired `result` markers (`PI_CLAUDE_CLI_TOOL_RESULTS=1`)                                                                                                                           |
+| 0.6.1   | A `result` with no content and no tokens (the CLI answering its own queued task notification) is a cycle boundary, not the turn's end                                                                                 |
 | 0.7.0   | One CLI process per pi session: custom-tool calls proxied through the MCP server instead of interrupt-and-resume, process parked between turns — no more full-context re-bill after a commit or branch rename         |
 
 ## Testing
