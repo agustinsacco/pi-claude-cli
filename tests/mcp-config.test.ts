@@ -376,3 +376,64 @@ describe("cleanupMcpConfigFiles", () => {
     expect(() => cleanupMcpConfigFiles()).not.toThrow();
   });
 });
+
+describe("writeSessionMcpConfig", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetMcpConfigCache();
+  });
+
+  it("writes one config per CLI session carrying the handoff socket and the session id", async () => {
+    const { writeSessionMcpConfig } = await import("../src/mcp-config");
+    const path = writeSessionMcpConfig(
+      "cli-77",
+      "/tmp/schema.json",
+      "/tmp/h.sock",
+    );
+    expect(path).toContain("cli-77");
+    const written = JSON.parse(mocks.writeFileSync.mock.calls[0][1] as string);
+    const args = written.mcpServers["custom-tools"].args as string[];
+    expect(args[0]).toMatch(/mcp-schema-server\.cjs$/);
+    expect(args.slice(1)).toEqual([
+      "/tmp/schema.json",
+      "/tmp/h.sock",
+      "cli-77",
+    ]);
+    // Written once per session.
+    expect(
+      writeSessionMcpConfig("cli-77", "/tmp/schema.json", "/tmp/h.sock"),
+    ).toBe(path);
+    expect(mocks.writeFileSync).toHaveBeenCalledTimes(1);
+  });
+
+  it("omits the socket arguments when no handoff socket is given", async () => {
+    const { writeSessionMcpConfig } = await import("../src/mcp-config");
+    writeSessionMcpConfig("cli-78", "/tmp/schema.json");
+    const written = JSON.parse(mocks.writeFileSync.mock.calls[0][1] as string);
+    expect(written.mcpServers["custom-tools"].args).toHaveLength(2);
+  });
+
+  it("session configs are removed on cleanup and on explicit removal", async () => {
+    const { writeSessionMcpConfig, removeSessionMcpConfig } =
+      await import("../src/mcp-config");
+    const a = writeSessionMcpConfig("cli-a", "/tmp/s.json", "/tmp/h.sock");
+    const b = writeSessionMcpConfig("cli-b", "/tmp/s.json", "/tmp/h.sock");
+    removeSessionMcpConfig("cli-a");
+    expect(mocks.unlinkSync).toHaveBeenCalledWith(a);
+    cleanupMcpConfigFiles();
+    expect(mocks.unlinkSync).toHaveBeenCalledWith(b);
+  });
+
+  it("writeSchemaFile bumps the version only when the surface changes", async () => {
+    const { writeSchemaFile } = await import("../src/mcp-config");
+    const defs = (d: string): McpToolDef[] => [
+      { name: "t", description: d, inputSchema: {} },
+    ];
+    const a = writeSchemaFile(defs("one"));
+    const b = writeSchemaFile(defs("one"));
+    const c = writeSchemaFile(defs("two"));
+    expect(a).toMatchObject({ changed: true, version: 1 });
+    expect(b).toMatchObject({ changed: false, version: 1 });
+    expect(c).toMatchObject({ changed: true, version: 2 });
+  });
+});

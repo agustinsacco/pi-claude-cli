@@ -49,6 +49,7 @@ vi.mock("@earendil-works/pi-ai/providers/all", () => ({
 
 import spawn from "cross-spawn";
 import { streamViaCli } from "../src/provider";
+import { resetCliProcessesForTests } from "../src/cli-process";
 
 const model = {
   id: "claude-haiku-4-5",
@@ -127,6 +128,7 @@ describe("resume-miss fallback (issue #2)", () => {
   let stateDir: string;
 
   beforeEach(() => {
+    resetCliProcessesForTests();
     vi.useFakeTimers();
     vi.clearAllMocks();
     stateDir = fsx.mkdtempSync(pathx.join(os.tmpdir(), "pcc-miss-"));

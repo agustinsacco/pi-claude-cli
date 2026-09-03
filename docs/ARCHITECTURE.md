@@ -34,13 +34,16 @@ pi agent loop
   └─ streamSimple(model, context, options)
        ├─ session-map     → resume the pi session's CLI session, or import
        ├─ prompt-builder  → delta (resume) or flattened history (import)
-       ├─ process-manager → spawn claude -p --output-format stream-json …
+       ├─ cli-process     → the session's live process if one is parked
+       │                    (0.7.0), else process-manager spawns claude -p …
        ├─ stream-parser   → NDJSON lines (never throws)
        ├─ event-bridge    → pi stream events; CLI-executed tools as markers,
        │                    HANDOFF (custom pi) tools as toolCall blocks
        ├─ control-handler → answers can_use_tool permission requests
-       └─ handoff         → clean `interrupt` at message_stop so pi executes
-                            custom tools; the CLI is never SIGKILLed mid-turn
+       ├─ handoff         → pi's stream ends at message_stop; the CLI blocks on
+       │                    the proxied tools/call (handoff-broker) until the
+       │                    next pi call answers it on the same process
+       └─ result          → the process is parked for the next turn, not killed
 ```
 
 ### Prompt in
@@ -68,19 +71,21 @@ claude -p --input-format stream-json --output-format stream-json
 ```
 
 stdin stays **open** after the user message: the CLI sends permission
-requests on stdout and expects answers on stdin mid-episode.
+requests on stdout and expects answers on stdin mid-episode — and, since
+0.7.0, the next turn's user message goes down the same stdin (see "One
+process per pi session" below).
 
 ### Stream out
 
 stdout is NDJSON. Five envelope types matter:
 
-| Envelope          | Handling                                                   |
-| ----------------- | ---------------------------------------------------------- |
-| `stream_event`    | Raw Anthropic SSE — bridged 1:1 into pi stream events      |
-| `assistant`       | Complete-block echo — used for CLI-side tool markers       |
-| `user`            | Tool results the CLI feeds itself between cycles — ignored |
-| `control_request` | Permission prompt — answered on stdin                      |
-| `result`          | Episode end: authoritative usage, final answer, errors     |
+| Envelope          | Handling                                                                                       |
+| ----------------- | ---------------------------------------------------------------------------------------------- |
+| `stream_event`    | Raw Anthropic SSE — bridged 1:1 into pi stream events                                          |
+| `assistant`       | Complete-block echo — used for CLI-side tool markers                                           |
+| `user`            | Tool results the CLI feeds itself between cycles (markers with `PI_CLAUDE_CLI_TOOL_RESULTS=1`) |
+| `control_request` | Permission prompt — answered on stdin                                                          |
+| `result`          | Episode end: authoritative usage, final answer, errors                                         |
 
 Two filters keep Claude Code's inner life out of pi's transcript: envelopes
 with `parent_tool_use_id` set (the CLI's own sub-agents) are dropped, and
@@ -217,9 +222,13 @@ executes under its own.
 artifact tools, MCP-adapter tools) cannot be renamed into Claude's
 vocabulary, so they are advertised over MCP: `mcp-config.ts` writes every
 non-built-in tool's schema to a temp file and points `--mcp-config` at
-`mcp-schema-server.cjs`, an MCP server that serves **schemas only and can
-execute nothing**. Claude emits `mcp__custom-tools__<name>`; the bridge
-strips the prefix; pi executes the real tool.
+`mcp-schema-server.cjs`. Claude emits `mcp__custom-tools__<name>`; the bridge
+strips the prefix and emits a pi `toolCall`; pi executes the real tool. The
+server itself executes nothing: its `tools/call` handler forwards the request
+over a local socket to `handoff-broker.ts` in pi's process and blocks until
+pi has run the tool (0.7.0). Before that it could only refuse, and the
+provider had to interrupt the CLI and resume a new process with the result
+pasted in as user text — see "One process per pi session".
 
 **Everything else** — WebSearch, WebFetch, ToolSearch, `Task` sub-agents,
 the user's own MCP servers — is executed **by the CLI itself**, mid-episode.
@@ -411,6 +420,62 @@ is passed through as its raw string rather than coerced to `{}`. That text is
 the only evidence of what actually arrived, and blanking it would turn a
 visible failure into a tool that silently ran with no arguments.
 
+## One process per pi session (0.7.0)
+
+A CLI process used to live exactly one pi call. That was the multiplier
+behind every avoidable cache miss: Claude Code rebuilds its system prompt at
+process start, and the prompt embeds a **git snapshot** (status, recent
+commits, branch). Any change to it between two processes — the model
+committing, pidex renaming the branch after naming, an untracked file —
+invalidated everything after the tools block, so the next process re-billed
+the whole context as cache write. Measured 2026-09-01 in one session: 64k,
+106k and 190k tokens on three restarts inside the 1h cache TTL; 1.87M tokens
+across three sessions that day. Reproduced deterministically: a commit
+between two `--resume` processes drops cache_read to the static prefix every
+time; within one process it never does.
+
+`src/cli-process.ts` therefore keeps the process:
+
+- **Through a handoff.** The permission for `mcp__custom-tools__*` is now
+  ALLOWED. The CLI calls `tools/call`; the schema server forwards it over the
+  broker socket with the CLI session id and `_meta["claudecode/toolUseId"]`;
+  pi's stream ends at `message_stop` with `stopReason: toolUse` exactly as
+  before, pi runs the tool, and the next `streamSimple` call — whose delta is
+  precisely the toolResults for the awaited ids — attaches to the same
+  process and answers the call. Either order works: the call may arrive
+  before pi's result (held as pending) or after (held as ready). The CLI
+  transcript records a real `tool_result`; the rejected-tool /
+  `[Request interrupted]` / `No response requested.` filler is gone.
+- **Across turns.** After `result` the process is parked
+  (`PI_CLAUDE_CLI_KEEPALIVE_MS`, default 10 min). The next call whose delta
+  is a user message writes it to the same stdin. Verified live: a commit
+  between turns costs 91 write tokens on the parked process, 8,827 on a fresh
+  one (`tests/live-persistent.test.ts`).
+
+Exactly one episode (pi call) is attached at a time; lines that arrive while
+none is — a built-in tool's result during a handoff, a sub-agent event — are
+buffered and replayed to the next episode. Permission requests are answered
+attached or not. The process is retired (interrupt if a turn is live, then
+stdin EOF, then SIGKILL after a grace) whenever the next call cannot use it:
+different model/effort/prompt mode/cwd, a rewritten tool schema (`version`
+bump — the CLI advertised the old surface at connect), a stale pi history, a
+delta that is not exactly the awaited tool results, or the idle timers
+(`PI_CLAUDE_CLI_HANDOFF_WAIT_MS` for a handoff pi never answers). Retiring
+falls back to the `--resume` path below, so nothing is lost — only the
+cache-warm restart is.
+
+**Billing across a long-lived process.** `result.usage` is per CLI turn, but
+`result.modelUsage` — the figure the provider trusts, because it includes
+sub-agents — is cumulative for the **process** (verified 2026-09-02, claude
+2.1.258). Each result is therefore billed as the delta against the previous
+result's totals, and a turn split across two episodes by a handoff is billed
+once: the finishing episode reports the turn's delta net of what the first
+episode already reported, floored at its own streamed cycles.
+
+`PI_CLAUDE_CLI_HANDOFF_PROXY=0` restores the interrupt-and-resume handoff
+(the schema server then answers `tools/call` with an error result). Without a
+pi session id (print mode, tests) nothing is parked or proxied.
+
 ## Session model: one CLI session per pi session
 
 pi's session JSONL is the **only** authoritative record; the CLI session is
@@ -581,19 +646,33 @@ fires, and the turn looks truncated. This was the root cause behind every
 | 0.4.12  | `--effort` maps 1:1 for every model; the opus up-shift (`high`→`max`) is gone, so a host asking for `high` gets `high`                                                                                                |
 | 0.4.13  | Sub-agent lifecycle surfaced: `task_started`/`task_notification` as markers, `task_progress` on the `claude-subagents` status key                                                                                     |
 | 0.4.14  | Background sub-agents run to completion and report back (a `result` with agents pending is a cycle, not the end); non-agent tasks and orphan notifications no longer reported as agents; `AskUserQuestion` disallowed |
+| 0.4.15  | System prompt re-sent on `--resume` (the CLI drops it), replayed verbatim from the sidecar so the cached prefix survives                                                                                              |
+| 0.4.16  | System prompt passed via the `-file` flag variants — the unsuffixed flags take a literal string, so pi's instructions had never reached the model                                                                     |
+| 0.5.0   | `--autocompact 200000` by default (`PI_CLAUDE_CLI_AUTOCOMPACT`)                                                                                                                                                       |
+| 0.5.1   | `PI_CLAUDE_CLI_STRICT_MCP`; the tool schema follows pi's registry instead of freezing at turn 1                                                                                                                       |
+| 0.5.2   | A tool call with no arguments reaches pi as `{}`                                                                                                                                                                      |
+| 0.6.0   | CLI-side tool results forwarded as paired `result` markers (`PI_CLAUDE_CLI_TOOL_RESULTS=1`)                                                                                                                           |
+| 0.6.1   | A `result` with no content and no tokens (the CLI answering its own queued task notification) is a cycle boundary, not the turn's end                                                                                 |
+| 0.7.0   | One CLI process per pi session: custom-tool calls proxied through the MCP server instead of interrupt-and-resume, process parked between turns — no more full-context re-bill after a commit or branch rename         |
 
 ## Testing
 
 - `npm test` — unit suites with mocked `cross-spawn`; includes
   `tests/fixtures/multi-cycle-episode.jsonl`, a **real captured 3-cycle
   episode** (claude 2.1.237) used to assert ordering, markers, and both
-  usage modes.
+  usage modes; `tests/persistent-cli.test.ts` drives two pi calls through one
+  mocked process (proxied handoff, turn continuation, delta billing, every
+  retire condition); `tests/schema-server-proxy.test.ts` runs the real
+  `mcp-schema-server.cjs` against a fake broker socket.
 - `npm run test:e2e` — full pipeline through a real `pi` binary against a
   deterministic CLI stub (`tests/e2e/claude-stub.cjs`); no credentials.
 - CI runs both on three OSes plus a weekly canary against `pi@latest`.
 - `scripts/e2e-live.sh` (= `PI_CLAUDE_CLI_LIVE=1 vitest run
 tests/live-observer.test.ts`) — live observer-mode suite against the real
-  CLI; spends plan quota, so it is not in CI. Covers: a native multi-tool
+  CLI; spends plan quota, so it is not in CI. `PI_CLAUDE_CLI_LIVE=1 npx
+vitest run tests/live-persistent.test.ts` proves the 0.7.0 cache properties
+  (one process through a handoff and a commit; the legacy path re-billing
+  after the same commit) with real usage numbers. Covers: a native multi-tool
   turn, a cheap resume of the same CLI session (asserts cacheRead > 5k and
   cacheWrite < 2k), the custom-tool handoff round-trip, a PreToolUse guard
   hook blocking an out-of-workspace read, and abort/steer + resume.

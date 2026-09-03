@@ -62,6 +62,7 @@ vi.mock("@earendil-works/pi-ai/providers/all", () => ({
 
 import spawn from "cross-spawn";
 import { streamViaCli } from "../src/provider";
+import { resetCliProcessesForTests } from "../src/cli-process";
 
 const model = {
   id: "claude-haiku-4-5",
@@ -139,6 +140,7 @@ function doneEvent(): any {
 
 describe("a result the CLI spent on its own queued prompt", () => {
   beforeEach(() => {
+    resetCliProcessesForTests();
     vi.useFakeTimers();
     vi.clearAllMocks();
   });

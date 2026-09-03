@@ -77,6 +77,7 @@ vi.mock("@earendil-works/pi-ai/providers/all", () => ({
 
 import spawn from "cross-spawn";
 import { streamViaCli } from "../src/provider";
+import { resetCliProcessesForTests } from "../src/cli-process";
 
 describe("provider registration (default export)", () => {
   it("registers provider with ID pi-claude-cli", async () => {
@@ -129,6 +130,7 @@ describe("provider registration (default export)", () => {
 
 describe("streamViaCli", () => {
   beforeEach(() => {
+    resetCliProcessesForTests();
     vi.clearAllMocks();
     vi.useFakeTimers();
   });
@@ -1853,6 +1855,7 @@ describe("streamViaCli", () => {
     let stateDir: string;
 
     beforeEach(() => {
+      resetCliProcessesForTests();
       stateDir = fsx.mkdtempSync(pathx.join(os.tmpdir(), "pcc-state-"));
       process.env.PI_CLAUDE_CLI_STATE_DIR = stateDir;
       // Pin the mode: which flag carries the prompt is asserted below, and an
