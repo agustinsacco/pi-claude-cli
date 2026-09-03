@@ -108,6 +108,33 @@ const AGENT_WAIT_TIMEOUT_MS =
  */
 const MAX_AGENT_CONTINUATIONS = 32;
 
+/**
+ * THE CLI CAN ANSWER A PROMPT THAT IS NOT OURS, AND THAT USED TO EAT A TURN.
+ *
+ * On `--resume` the CLI drains its own queue first. A session whose previous
+ * turn launched a background task gets a `<task-notification>` enqueued ahead
+ * of our prompt ("background shell command task(s) from the previous session
+ * have no completion record") — because pi-claude-cli exits the CLI process at
+ * the end of every turn, which orphans exactly those tasks. The CLI dequeues
+ * the notification, decides it needs no reply, and emits `result` in under a
+ * second, having never called the model. Our prompt is still queued behind it.
+ *
+ * Ending the episode on that `result` is what made the user's first message
+ * (and often the second) do nothing: pi got an assistant message with empty
+ * content and zero tokens, and the CLI transcript was left ending on an
+ * unanswered user entry — so the NEXT `--resume` spliced "Continue from where
+ * you left off." / "No response requested." filler in to repair it. That
+ * filler changes the cached prefix, so the whole conversation re-billed as
+ * cache WRITE. Captured 2026-09-01 on claude 2.1.258: 329,944 cache-creation
+ * tokens and zero cache read on the repairing resume, against ~400 write /
+ * ~315k read on every healthy cycle of the same session.
+ *
+ * So a `result` that carried no content AND spent no tokens is a cycle
+ * boundary, not the end of the episode. Bounded below, and by the inactivity
+ * timer, which still fires if the CLI has genuinely gone quiet.
+ */
+const MAX_EMPTY_CONTINUATIONS = 4;
+
 /** Extended stream options: pi's SimpleStreamOptions plus optional cwd and mcpConfigPath */
 type StreamViaCLiOptions = SimpleStreamOptions & {
   cwd?: string;
@@ -302,6 +329,9 @@ export function streamViaCli(
       // envelopes have been treated as cycle boundaries, and the wall-clock
       // backstop that stops waiting no matter what the agents are doing.
       let agentContinuations = 0;
+      // Results consumed by a prompt of the CLI's own. See
+      // MAX_EMPTY_CONTINUATIONS.
+      let emptyContinuations = 0;
       let agentWaitTimer: ReturnType<typeof setTimeout> | undefined;
       let agentWaitExpired = false;
       let waitingForAgents = false;
@@ -320,6 +350,25 @@ export function streamViaCli(
         clearTimeout(agentWaitTimer);
         cleanupProcess(proc!);
         rl.close();
+      }
+
+      /**
+       * Nothing to hand pi: no content blocks and no tokens spent. Both halves
+       * matter — a model that legitimately answers with silence still bills
+       * for the call, so usage alone separates "said nothing" from "never
+       * ran".
+       */
+      function episodeIsEmpty(): boolean {
+        const output = bridge.getOutput();
+        if (output.content.length > 0) return false;
+        const u = output.usage;
+        if (!u) return true;
+        return (
+          (u.input ?? 0) === 0 &&
+          (u.output ?? 0) === 0 &&
+          (u.cacheRead ?? 0) === 0 &&
+          (u.cacheWrite ?? 0) === 0
+        );
       }
 
       function resetInactivityTimer() {
@@ -523,6 +572,21 @@ export function streamViaCli(
             // is `error_during_execution` BY DESIGN — the turn content (the
             // handoff toolCall) is already accumulated; usage still applies.
             bridge.applyResult(r);
+          }
+
+          // The CLI answered a queued prompt of its own (see
+          // MAX_EMPTY_CONTINUATIONS): nothing was said and nothing was
+          // spent, so ours has not run yet. Keep reading.
+          if (
+            !isError &&
+            !selfInterrupted &&
+            !aborted &&
+            emptyContinuations < MAX_EMPTY_CONTINUATIONS &&
+            episodeIsEmpty()
+          ) {
+            emptyContinuations++;
+            resetInactivityTimer();
+            return;
           }
 
           // Sub-agents still working: this result ends a CYCLE, not the
