@@ -17,8 +17,8 @@ the pi coding agent extended into a desktop IDE, and the most advanced
 multi-provider agentic IDE you can run on your own machine. pidex works with
 every pi provider (Anthropic, OpenAI, Google, Bedrock, and the rest), and with
 this extension it turns a Claude Pro/Max subscription into a full desktop IDE:
-chat with real diffs, file explorer, terminal, versioned artifacts, and an
-orchestrator that manages sessions — no API key needed.
+chat with real diffs, file explorer, terminal, and versioned artifacts — no
+API key needed.
 
 ![A pidex session: streaming transcript with an expandable edit diff](https://raw.githubusercontent.com/agustinsacco/pidex/main/docs/img/chat.png)
 
