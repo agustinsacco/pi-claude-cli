@@ -10,6 +10,31 @@
 
 A [pi](https://github.com/earendil-works/pi) extension that routes LLM calls through the [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) as a subprocess. Use your Claude Pro/Max subscription as the LLM backend — no API key, no separate billing.
 
+## Best experienced in pidex
+
+This fork is developed against [pidex](https://github.com/agustinsacco/pidex) —
+the pi coding agent extended into a desktop IDE, and the most advanced
+multi-provider agentic IDE you can run on your own machine. pidex works with
+every pi provider (Anthropic, OpenAI, Google, Bedrock, and the rest), and with
+this extension it turns a Claude Pro/Max subscription into a full desktop IDE:
+chat with real diffs, file explorer, terminal, versioned artifacts, and an
+orchestrator that manages sessions — no API key needed.
+
+![A pidex session: streaming transcript with an expandable edit diff](https://raw.githubusercontent.com/agustinsacco/pidex/main/docs/img/chat.png)
+
+Everything this extension emits has a first-class surface there:
+
+- The `[Claude Code · Tool]` activity markers render as expandable steps in
+  the transcript, not raw text.
+- The `claude-rate-limit` status key feeds pidex's context meter, so your
+  plan's usage window and reset time are always visible.
+- The `claude-subagents` status key turns a `Task` fan-out into live
+  per-agent progress instead of a blank pane.
+- pidex sets `PI_CLAUDE_CLI_STRICT_MCP=1` on every session, so the CLI's MCP
+  traffic stays under the host's tool guards.
+
+[Install pidex →](https://github.com/agustinsacco/pidex#install)
+
 ## How it works
 
 The extension registers as a custom pi provider exposing all Claude models. It runs in **observer mode**: the Claude Code CLI is a first-class agent that owns its loop, its tools and its session — pi is the system of record and observes the stream. One CLI session per pi session, resumed with `--resume` on every follow-up turn, so token use matches using the CLI directly. Built-in tools (Read, Bash, …) execute natively inside the CLI and surface to pi as `[Claude Code · Name]` activity markers. Custom pi tools are advertised via a schema-only MCP server and **handed off**: the provider interrupts the turn cleanly, pi executes the tool (all pi hooks fire), and the next turn resumes with the result.
@@ -268,7 +293,7 @@ the next new session, not the current one.
 > instructions never reached the model, on ANY turn, since the very first spawn.
 > Fixed by switching to `--system-prompt-file` / `--append-system-prompt-file`,
 > which take a path. See
-> [pidex's write-up](https://github.com/agustinsacco/pidex/blob/main/specs/log/2026-08-29-claude-cli-lifecycle-verification.md)
+> [pidex's write-up](https://github.com/agustinsacco/pidex/blob/main/docs/log/2026-08-29-claude-cli-lifecycle-verification.md)
 > for the live before/after.
 
 ## License
