@@ -12,6 +12,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve, join, dirname } from "node:path";
 import { homedir } from "node:os";
 import {
+  alignPiContext,
+  usesPiContext,
+  ContextPolicyError,
+} from "./context-policy.js";
+import {
   DEFAULT_SYSTEM_PROMPT_MODE,
   type SystemPromptMode,
 } from "./system-prompt-mode.js";
@@ -420,6 +425,16 @@ export function buildSystemPrompt(
   cwd: string,
   mode: SystemPromptMode = DEFAULT_SYSTEM_PROMPT_MODE,
 ): string {
+  if (usesPiContext()) {
+    if (mode !== "claude") {
+      throw new ContextPolicyError(
+        "PI_CLAUDE_CLI_CONTEXT=pi requires the default claude system-prompt mode.",
+      );
+    }
+    // pi already loaded project files and skills. No second AGENTS discovery,
+    // path sanitization, or history-dependent instructions in this policy.
+    return alignPiContext(context.systemPrompt ?? "");
+  }
   const parts: string[] = [];
 
   if (context.systemPrompt) {

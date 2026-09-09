@@ -35,6 +35,11 @@ import {
 } from "./prompt-builder.js";
 import { resolveSystemPromptMode } from "./system-prompt-mode.js";
 import {
+  usesPiContext,
+  assertContextPolicy,
+  ContextPolicyError,
+} from "./context-policy.js";
+import {
   spawnClaude,
   captureStderr,
   forceKillProcess,
@@ -378,6 +383,16 @@ export function streamViaCli(
         options?.thinkingBudgets,
       );
       const systemPromptMode = resolveSystemPromptMode();
+      const piContext = usesPiContext();
+      // Never attach a new context policy to a transcript that still carries
+      // the other loader's instructions. Leave that session available under
+      // its original policy; the host/user must start a fresh pi session.
+      const mappedContextId = piSessionId
+        ? getCliSession(piSessionId)
+        : undefined;
+      if (mappedContextId && !stale && !forceFullReplay) {
+        assertContextPolicy(getSystemPrompt(mappedContextId), piContext);
+      }
       const autocompact = resolveAutocompact();
       const handoffSocketPath = options?.mcpConfig?.handoffSocket
         ? await options.mcpConfig.handoffSocket
@@ -389,6 +404,7 @@ export function streamViaCli(
         model.id,
         effort ?? null,
         systemPromptMode,
+        piContext,
         cwd,
         options?.mcpConfigPath ?? null,
         options?.mcpConfig?.schemaPath ?? null,
@@ -1000,6 +1016,23 @@ export function streamViaCli(
         await runOnce(true);
       }
     } catch (err: any) {
+      if (err instanceof ContextPolicyError) {
+        // pi's stream result must be an AssistantMessage, not a raw error
+        // string (agent-loop inspects .content even when a call failed).
+        const message = createEventBridge(stream, model).getOutput();
+        stream.push({
+          type: "done",
+          reason: "stop",
+          message: {
+            ...message,
+            content: [{ type: "text", text: err.message }],
+            stopReason: "error",
+            errorMessage: err.message,
+          },
+        } as any);
+        stream.end();
+        return;
+      }
       stream.push({
         type: "error",
         reason: "error",

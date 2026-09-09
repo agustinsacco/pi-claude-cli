@@ -49,7 +49,7 @@ The request flow, entry to exit:
 
 1. **`index.ts`** — extension entry. Validates the CLI is present/authenticated, registers the provider exposing all `anthropic` models from pi's catalog, and lazily builds the MCP config on the first request (`getAllTools()` is not safe to call at load time). On `session_start` it force-activates every registered tool so pi will execute them, and stashes the `ctx` used to publish account status. Registration happens **twice** — `pi.registerProvider()` and `registerApiProvider()` from `@earendil-works/pi-ai/compat` — because pi 0.84 has two dispatch paths; drop the second and print mode and nested agent loops throw `No API provider registered`.
 2. **`src/provider.ts`** (`streamViaCli`) — the orchestrator. Builds the prompt, spawns the subprocess, writes the user message to stdin, reads stdout line-by-line, and drives the whole lifecycle (inactivity timeout, abort, cleanup). Returns an `AssistantMessageEventStream` that pi consumes.
-3. **`src/prompt-builder.ts`** — flattens pi's message history into the text/blocks prompt. First turn → full history via `buildPrompt`; resumed turns → only the new tail via `buildResumePrompt`. Also builds the system prompt (merges `AGENTS.md`, sanitizing `.pi` → `.claude`).
+3. **`src/prompt-builder.ts`** — flattens pi's message history into the text/blocks prompt. First turn → full history via `buildPrompt`; resumed turns → only the new tail via `buildResumePrompt`. Legacy mode discovers `AGENTS.md` and sanitizes `.pi` → `.claude`. With `PI_CLAUDE_CLI_CONTEXT=pi`, `src/context-policy.ts` instead aligns the generated tool preamble, preserves pi's context and paths, and skips rediscovery; see `docs/CONTEXT-POLICY.md`.
 4. **`src/process-manager.ts`** — spawns `claude` with the correct flags via `cross-spawn`, writes NDJSON to stdin, force-kills (SIGKILL), and keeps a registry of live subprocesses so they can all be reaped on exit.
 5. **`src/stream-parser.ts`** — resilient NDJSON line parser; never throws, returns `null` for junk/debug/malformed lines.
 6. **`src/event-bridge.ts`** — translates each Claude API streaming event into pi stream events (`text_*`, `thinking_*`, `toolcall_*`) and accumulates the final `AssistantMessage` with usage/cost.
@@ -64,6 +64,14 @@ and its session; pi is the system of record and an observer of the stream
 (docs/SPEC-observer-mode.md). Do not push pi's agenda onto the CLI — where pi
 needs a say, use the CLI's extension points (hooks via `PI_CLAUDE_CLI_SETTINGS`,
 MCP), never process surgery.
+
+`PI_CLAUDE_CLI_CONTEXT=pi` is a context policy, **not** pi-only tool execution.
+It retains native tools and the Claude default prompt, suppresses duplicate
+skill/memory/MCP discovery, and preserves explicit host guards. Hosts must
+retain pi project discovery and start fresh sessions across policy changes.
+Tests: `context-policy`, `context-spawn`, `persistent-cli`, and the opt-in
+`live-context-policy` suite. Do not replace this with `--bare` or blanket hook
+disabling; either would violate the authentication/guard contract.
 
 - **Built-in and CLI-side tools run natively.** They surface to pi as
   `[Claude Code · Name {args}]` marker text blocks (a wire contract front-ends

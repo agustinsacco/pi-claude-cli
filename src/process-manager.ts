@@ -17,6 +17,11 @@ import {
   type SystemPromptMode,
 } from "./system-prompt-mode.js";
 import { resolveAutocompact } from "./autocompact.js";
+import {
+  usesPiContext,
+  ContextPolicyError,
+  assertContextCliVersion,
+} from "./context-policy.js";
 
 /**
  * Spawn a Claude CLI subprocess with all required flags for stream-json communication.
@@ -73,6 +78,25 @@ export function spawnClaude(
     systemPromptMode?: SystemPromptMode;
   },
 ): ChildProcess {
+  const piContext = usesPiContext();
+  if (piContext) {
+    assertContextCliVersion(
+      execSync("claude --version", { stdio: "pipe", timeout: 5000 }).toString(),
+    );
+  }
+  if (
+    piContext &&
+    (envFlag("CLAUDE_CODE_SIMPLE") || envFlag("CLAUDE_CODE_SAFE_MODE"))
+  ) {
+    throw new ContextPolicyError(
+      "Unset CLAUDE_CODE_SIMPLE/CLAUDE_CODE_SAFE_MODE: pi context requires subscription authentication and the explicit MCP bridge.",
+    );
+  }
+  if (piContext && options?.systemPromptMode === "pi") {
+    throw new ContextPolicyError(
+      "PI_CLAUDE_CLI_CONTEXT=pi retains Claude Code's default system prompt.",
+    );
+  }
   const args = [
     "-p",
     "--input-format",
@@ -105,7 +129,7 @@ export function spawnClaude(
   // MCP servers do not). A host wants this on its own: MCP servers the host
   // did not configure are invisible to it, bypass its tool guards, and are
   // never counted by pi-side status or context accounting.
-  if (isHermetic() || isStrictMcp()) {
+  if (piContext || isHermetic() || isStrictMcp()) {
     args.push("--strict-mcp-config");
   }
 
@@ -114,8 +138,11 @@ export function spawnClaude(
   // flag on purpose: a host that already suppresses pi's own copy of
   // CLAUDE.md relies on the CLI loading it, and bundling the two would leave
   // the model with no project instructions from either side.
-  if (isHermetic()) {
+  if (piContext || isHermetic()) {
     args.push("--setting-sources", "");
+  }
+  if (piContext) {
+    args.push("--disable-slash-commands", "--no-chrome");
   }
 
   if (options?.resumeSessionId) {
@@ -187,6 +214,16 @@ export function spawnClaude(
   // hour before it gives up on a call. Config, not context: it never touches
   // the prompt cache.
   const env = { ...process.env };
+  if (piContext) {
+    // Do not use --bare: it disables subscription OAuth/keychain reads.
+    // Empty setting sources drop user/project/local hooks, but explicit
+    // host --settings (including safety guards) and managed policy survive.
+    Object.assign(env, {
+      CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1",
+      CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
+      ENABLE_CLAUDEAI_MCP_SERVERS: "false",
+    });
+  }
   if (!env.MCP_TOOL_TIMEOUT)
     env.MCP_TOOL_TIMEOUT = String(DEFAULT_MCP_TOOL_TIMEOUT_MS);
 
