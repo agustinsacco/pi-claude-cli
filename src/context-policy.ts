@@ -70,12 +70,12 @@ export function alignPiContext(prompt: string): string {
     // artifact guidelines survive, as does the complete suffix below.
     preamble = preamble
       .split("\n")
-      .filter(
-        (line) =>
-          !/^- (?:Use edit for precise changes|When changing (?:multiple )?separate locations|Each edits\[\]\.oldText)/.test(
-            line,
-          ),
-      )
+      // `edits[]` is pi's edit signature; native Edit takes one old_string per
+      // call. So ANY line naming that array is wrong here, whatever its
+      // wording — that is the rule, rather than a list of the phrasings pi
+      // happens to ship. Enumerating them missed "Keep edits[].oldText as
+      // small as possible…" in pi 0.85.1, and it reached live sessions.
+      .filter((line) => !line.includes("edits[]"))
       .map((line) =>
         line.replace(
           /\b(Use|use|Prefer|prefer) (read|write|edit|bash|grep|find)\b/g,

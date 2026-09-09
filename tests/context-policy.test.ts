@@ -35,6 +35,8 @@ Guidelines:
 - Use grep to search files
 - Use edit for precise changes (edits[].oldText must match exactly)
 - When changing separate locations use edits[]
+- Each edits[].oldText is matched against the original file, not after earlier edits are applied.
+- Keep edits[].oldText as small as possible while still being unique in the file. Do not pad with large unchanged regions.
 - Use artifact_create for substantial deliverables
 - Theme: honor light and dark modes
 - Custom annotations may use oldText and newText
@@ -87,7 +89,9 @@ describe("pi context with native execution", () => {
       "- Use available native search tools (or Bash) to search files",
     );
     expect(out).toContain("only if actually advertised; otherwise use Bash");
-    expect(out).not.toContain("- When changing separate locations use edits[]");
+    // Every phrasing pi 0.85.1 ships, not just the three the first cut listed:
+    // "Keep edits[].oldText as small as possible" survived into live sessions.
+    expect(out).not.toContain("edits[]");
     expect(out).toContain("- Use artifact_create for substantial deliverables");
     expect(out).toContain("- Theme: honor light and dark modes");
     expect(out).toContain(

@@ -64,9 +64,13 @@ starts; legacy mode retains its previous compatibility.
 
 The alignment changes only the recognized, generated pi preamble. Native
 file/edit descriptions are schema-appropriate; pi-only multi-edit instructions
-are removed there. Search tools are not assumed: some CLI/model inventories
-omit Grep/Glob, so guidance uses native search tools only when advertised and
-Bash otherwise. Custom-tool descriptions and artifact guidelines remain.
+are removed there. That removal keys on `edits[]` — pi's edit signature, which
+native Edit does not have — so it holds whatever wording pi ships. Matching a
+list of known phrasings instead let pi 0.85.1's "Keep edits[].oldText as small
+as possible…" through to live sessions. Search tools are not assumed: some
+CLI/model inventories omit Grep/Glob, so guidance uses native search tools only
+when advertised and Bash otherwise. Custom-tool descriptions and artifact
+guidelines remain.
 User directives, project-file contents, skill indexes, and `.pi` paths in the
 suffix are preserved byte-for-byte. A vocabulary binding explains how names
 inside those unchanged instructions map to the actual tools. Unknown/custom
