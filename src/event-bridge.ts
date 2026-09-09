@@ -21,6 +21,7 @@ import {
   translateClaudeArgsToPi,
   isHandoffClaudeTool,
 } from "./tool-mapping.js";
+import { buildCallPayload, buildResultPayload } from "./tool-markers.js";
 
 /**
  * Extended tracking for tool_use content blocks during streaming.
@@ -106,14 +107,6 @@ function resultForwardingEnabled(): boolean {
 }
 
 /**
- * Cap on the forwarded result preview. The full output lives in the CLI's
- * own transcript; this preview exists so a front-end can show "what came
- * back" without pi's session file growing by megabytes on a 300-tool
- * session. `length` in the payload always reports the uncapped size.
- */
-const RESULT_PREVIEW_LIMIT = 2000;
-
-/**
  * Flatten a tool_result's `content` to text. The CLI sends either a plain
  * string or an array of blocks; only text blocks contribute (a Read of an
  * image yields tool_reference/image blocks and an empty preview).
@@ -164,7 +157,7 @@ function mapStopReason(
 export function createEventBridge(
   stream: AssistantMessageEventStream,
   model: Model<any>,
-  options?: { markedToolIds?: Set<string> },
+  options?: { markedTools?: Map<string, string> },
 ): EventBridge {
   // Tracked content blocks indexed by Claude's content_block index
   const blocks: TrackedBlock[] = [];
@@ -219,11 +212,16 @@ export function createEventBridge(
    * billed — and `totalTokens` carries the last cycle's context instead.
    */
   let lastCycleContext = 0;
-  /** Tool ids already surfaced as markers (envelope arrives once per block). */
-  // Shared across the episodes of one CLI process when the caller passes a
-  // set: a built-in tool called in one episode may report its result in the
-  // next (the process kept running through a proxied handoff).
-  const markedToolIds = options?.markedToolIds ?? new Set<string>();
+  /**
+   * Tool ids already surfaced as markers (the envelope arrives once per
+   * block), mapped to the tool each call named — the result marker reports
+   * it, so a front-end can render a result row without pairing first.
+   *
+   * Shared across the episodes of one CLI process when the caller passes a
+   * map: a built-in tool called in one episode may report its result in the
+   * next (the process kept running through a proxied handoff).
+   */
+  const markedTools = options?.markedTools ?? new Map<string, string>();
   /** tool_use_ids whose result marker already went out (CLI dupe guard). */
   const forwardedResultIds = new Set<string>();
 
@@ -674,23 +672,19 @@ export function createEventBridge(
       // tool calls — markers are for everything the CLI executes itself,
       // which in observer mode includes the built-in file tools.
       if (isHandoffClaudeTool(block.name)) continue;
-      if (markedToolIds.has(block.id)) continue;
-      markedToolIds.add(block.id);
+      if (markedTools.has(block.id)) continue;
+      markedTools.set(block.id, block.name);
 
-      let argsPreview = "";
+      let argsPayload = "";
       try {
-        const json = JSON.stringify(block.input ?? {});
-        argsPreview =
-          json === "{}"
-            ? ""
-            : ` ${json.slice(0, 120)}${json.length > 120 ? "…" : ""}`;
+        argsPayload = buildCallPayload(block.name, block.input);
       } catch {
         /* unserializable input — marker still names the tool */
       }
       // WIRE CONTRACT — front-ends parse these strings.
       //
       //   [Claude Code · <ToolName>]              (no arguments)
-      //   [Claude Code · <ToolName> <argsJson>]   (preview, may be truncated)
+      //   [Claude Code · <ToolName> <argsJson>]
       //
       // With PI_CLAUDE_CLI_TOOL_RESULTS=1 — a host opt-in, because a
       // front-end that has not learned these shapes renders them as prose —
@@ -700,10 +694,11 @@ export function createEventBridge(
       //   [Claude Code · <ToolName> #<toolUseId> <argsJson>]
       //   [Claude Code · result #<toolUseId> <payloadJson>]
       //
-      // payloadJson is COMPLETE JSON ({"status":"ok"|"error","preview":…,
-      // "length":…,"truncated"?:true}) — safe to parse, unlike the args
-      // preview, which is truncated here, frequently invalid JSON, and must
-      // never be parsed.
+      // BOTH payloads are complete, parseable JSON — since 0.8.0 for the
+      // call payload, which used to be `JSON.stringify(input)` cut at 120
+      // characters and so was usually invalid and usually missing the end of
+      // the one value worth reading. `src/tool-markers.ts` explains what
+      // that cost and what it selects instead.
       //
       // pidex matches /^\[Claude Code · ([^\s\]]+)(?:\s+([\s\S]*))?\]$/ to
       // render these as activity rows instead of prose; anything it cannot
@@ -711,7 +706,8 @@ export function createEventBridge(
       // marker existed to avoid. Change the shapes only together with the
       // consumers.
       const idTag = resultForwardingEnabled() ? ` #${block.id}` : "";
-      appendTextBlock(`[Claude Code · ${block.name}${idTag}${argsPreview}]`);
+      const args = argsPayload ? ` ${argsPayload}` : "";
+      appendTextBlock(`[Claude Code · ${block.name}${idTag}${args}]`);
     }
   }
 
@@ -720,23 +716,38 @@ export function createEventBridge(
     // Sub-agent envelopes are the CLI's internal business, same as in
     // handleAssistantEnvelope.
     if (envelope.parent_tool_use_id) return;
-    for (const block of envelope.message?.content ?? []) {
+    const blocks = envelope.message?.content ?? [];
+    // `tool_use_result` sits on the ENVELOPE, not on the block, so it can
+    // only be attributed when the envelope carries a single result. In every
+    // capture so far the CLI sends one per envelope; a batched envelope from
+    // some future version degrades to the text-only summary rather than
+    // labelling one tool's outcome with another's metrics.
+    const results = blocks.filter((block) => block.type === "tool_result");
+    const detail = results.length === 1 ? envelope.tool_use_result : undefined;
+
+    for (const block of blocks) {
       if (block.type !== "tool_result" || !block.tool_use_id) continue;
       // Only results for tools that got a call marker. Everything else is
       // either a handoff replay (pi executed it and has the real result —
       // rendering it again would double it) or noise from an envelope this
       // bridge never saw.
-      if (!markedToolIds.has(block.tool_use_id)) continue;
+      const tool = markedTools.get(block.tool_use_id);
+      if (!tool) continue;
       if (forwardedResultIds.has(block.tool_use_id)) continue;
       forwardedResultIds.add(block.tool_use_id);
 
-      const text = resultText(block.content);
-      const payload: Record<string, unknown> = {
-        status: block.is_error ? "error" : "ok",
-        preview: text.slice(0, RESULT_PREVIEW_LIMIT),
-        length: text.length,
-      };
-      if (text.length > RESULT_PREVIEW_LIMIT) payload.truncated = true;
+      let payload: Record<string, unknown>;
+      try {
+        payload = buildResultPayload({
+          tool,
+          isError: block.is_error === true,
+          text: resultText(block.content),
+          detail,
+        });
+      } catch {
+        // A marker must never cost a turn. Status alone still pairs.
+        payload = { status: block.is_error ? "error" : "ok", tool };
+      }
       appendTextBlock(
         `[Claude Code · result #${block.tool_use_id} ${JSON.stringify(payload)}]`,
       );

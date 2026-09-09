@@ -169,17 +169,54 @@ go on the wire, paired by `tool_use_id`:
 [Claude Code · result #<toolUseId> <payloadJson>]    ← its result
 ```
 
-`payloadJson` is complete, parseable JSON:
-`{"status":"ok"|"error","preview":string,"length":number,"truncated"?:true}`.
-The preview is capped at 2,000 characters (`length` always reports the full
-size); the full output remains in the CLI's own transcript. Results are only
-forwarded for tools that produced a call marker — handoff tools are executed
-by pi, which already has their real result, and their replayed `tool_result`
-envelopes are ignored.
+`payloadJson` is complete, parseable JSON. Every payload carries
+`status` (`"ok"` / `"error"`), the `tool` it answers, a printable `summary`,
+the `preview` (capped at 2,000 characters) and the full `length` — plus
+whatever metrics the tool's own result made available:
+
+| Tool             | Metrics                                 | `summary`                                       |
+| ---------------- | --------------------------------------- | ----------------------------------------------- |
+| `Read`           | `path`, `lines`, `totalLines`           | `419 lines` / `lines 201-300 of 900`            |
+| `Bash`           | `lines`, `bytes`, `stderrLines`         | `4 lines out · 2 on stderr`                     |
+| `Bash` (failed)  | `exitCode`, `error`                     | `exit 1 · ls: /nope: No such file or directory` |
+| `Edit` / `Write` | `path`, `added`, `removed`, `lines`     | `+1 -1 in poem.txt` / `created poem.txt`        |
+| `Grep`           | `files`, `matches`                      | `1 match` / `12 matches in 3 files`             |
+| `Glob`           | `files`, `durationMs`, `filesTruncated` | `4 files`                                       |
+| anything else    | `lines`                                 | `12 lines` / `empty`                            |
+
+These come from the CLI's own `tool_use_result` object, which it publishes on
+the `user` envelope beside each `tool_result`. A tool whose shape this
+provider does not recognise still gets `status`, `summary` and a line count,
+so a row is never reduced to "ok". The full output stays in the CLI's own
+transcript.
+
+Results are only forwarded for tools that produced a call marker — handoff
+tools are executed by pi, which already has their real result, and their
+replayed `tool_result` envelopes are ignored.
 
 This is a host **opt-in** because it changes the marker wire contract: a
 front-end that has not learned the id-tagged shapes would render them as
-prose. Leave it unset and the wire format is byte-identical to pre-0.6.0.
+prose. Leave it unset and the call marker keeps its pre-0.6.0 shape (`0.8.0`
+still improves what is inside `argsJson` — see below).
+
+### What a call marker contains
+
+`argsJson` is complete, parseable JSON as of 0.8.0. It used to be
+`JSON.stringify(input)` cut at 120 characters, which meant it usually did not
+parse, and the cut took the END off values — so `Read` of a deep worktree
+path rendered as `Read cl…` while the marker spent its whole budget on
+directory names. `src/tool-markers.ts` now picks each tool's identifying
+arguments in priority order, clips values one at a time (paths from the
+front, so the filename survives), replaces bulk arguments with measurements
+rather than dumping them, and enforces its 700-character budget by dropping
+trailing fields instead of cutting the document:
+
+```
+[Claude Code · Read {"file_path":"…/features/chat/items/transcriptRows.ts"}]
+[Claude Code · Write {"file_path":"/repo/poem.txt","lines":3,"bytes":70}]
+[Claude Code · Edit {"file_path":"/repo/a.ts","new_lines":3,"old_lines":2}]
+[Claude Code · TodoWrite {"todos":4,"done":2,"active":"Wiring the marker"}]
+```
 
 ### Persistent CLI process
 

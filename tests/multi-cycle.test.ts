@@ -865,7 +865,13 @@ describe("tool result forwarding through the provider (PI_CLAUDE_CLI_TOOL_RESULT
     const tsPayload = JSON.parse(
       /^\[Claude Code · result #\S+ (.*)\]$/s.exec(toolSearchResult!)![1]!,
     );
-    expect(tsPayload).toEqual({ status: "ok", preview: "", length: 0 });
+    expect(tsPayload).toEqual({
+      status: "ok",
+      tool: "ToolSearch",
+      summary: "empty",
+      preview: "",
+      length: 0,
+    });
 
     // WebSearch's result is a real is_error string.
     const webSearchResult = texts.find((t: string) =>

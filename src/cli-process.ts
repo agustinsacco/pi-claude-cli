@@ -130,8 +130,11 @@ export class CliProcess implements HandoffTarget {
   /** Retired by the pool or the provider; no episode may attach again. */
   retired = false;
 
-  /** Shared across episodes: call markers whose results may arrive later. */
-  readonly markedToolIds = new Set<string>();
+  /**
+   * Shared across episodes: call markers whose results may arrive later,
+   * mapped to the tool each one named so its result marker can name it too.
+   */
+  readonly markedTools = new Map<string, string>();
   /** Shared across episodes: sub-agents live in the process, not the call. */
   readonly taskTracker = createTaskTracker();
 

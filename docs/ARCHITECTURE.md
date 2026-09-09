@@ -247,13 +247,24 @@ Front-ends parse the marker string, so its shape is API:
 
 ```
 [Claude Code · <ToolName>]              # no arguments
-[Claude Code · <ToolName> <argsJson>]   # preview, truncated at ~120 chars
+[Claude Code · <ToolName> <argsJson>]   # complete, parseable JSON
 ```
 
 pidex renders matches as activity rows and anything else as markdown prose,
-so a format change that looks cosmetic here degrades rendering there. The
-argument preview is deliberately opaque: truncation makes it invalid JSON
-often enough that consumers must treat it as a display string.
+so a format change that looks cosmetic here degrades rendering there.
+
+`argsJson` is **complete JSON** as of 0.8.0, and `src/tool-markers.ts`
+decides what goes in it. Before that it was `JSON.stringify(input)` cut at
+120 characters: usually invalid JSON (so a consumer needed a fragment
+scanner with its own escape decoder), cut at the END of values — so an
+absolute path lost the filename, the one part a row shows — and easily
+consumed whole by a single bulk argument (`Write`'s file contents, `Edit`'s
+replacement, `Task`'s prompt). Now each tool contributes its identifying
+arguments in priority order, values are clipped individually (paths from the
+front, keeping the tail), bulk arguments are replaced by measurements
+(`lines`, `bytes`, `edits`, and for `TodoWrite` the live item), and the
+700-character budget is enforced by dropping trailing fields rather than by
+cutting the document.
 
 ### Not yet surfaced (extension seams)
 
@@ -266,11 +277,17 @@ dropped:
   `#<toolUseId>` tag and each result becomes a
   `[Claude Code · result #<toolUseId> {payload}]` marker
   (`handleUserEnvelope`), letting a front-end pair them and render CLI-side
-  tools as expandable rows. The payload is complete JSON — status, a capped
-  preview, the full length — and only ids that produced a call marker are
-  forwarded, so a handoff tool's replayed result (pi already has the real
-  one) never renders twice. Without the flag the wire is unchanged: the
-  id-tagged shapes are a contract change a consumer must know how to parse.
+  tools as expandable rows. The payload is complete JSON: `status`, the
+  `tool` it answers, a printable `summary`, typed metrics, a capped `preview`
+  and the full `length`. The metrics come from the CLI's own
+  `tool_use_result` object — a read's `numLines`/`totalLines`, an edit's
+  `structuredPatch`, a command's `stdout`/`stderr`/`interrupted`, a glob's
+  `numFiles`, a failed command's exit code — so a row can say "419 lines" or
+  "exit 1 · No such file" instead of just "ok". Only ids that produced a call
+  marker are forwarded, so a handoff tool's replayed result (pi already has
+  the real one) never renders twice. Without the flag the wire is unchanged:
+  the id-tagged shapes are a contract change a consumer must know how to
+  parse.
 - **Sub-agent transcripts.** What a sub-agent actually did — its own tool
   calls and text — arrives with `parent_tool_use_id` set and is still
   filtered out in both `provider.ts` and `handleAssistantEnvelope`. Those

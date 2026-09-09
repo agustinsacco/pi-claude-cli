@@ -1834,6 +1834,12 @@ describe("createEventBridge", () => {
         expect(resultPayload(texts[1]!)).toEqual({
           id: "t1",
           status: "ok",
+          // Named after the call it answers, so a result row needs no pairing
+          // to know what ran, and measured even with nothing structured to
+          // read — see tests/tool-markers.test.ts for the metric shapes.
+          tool: "Read",
+          summary: "1 line",
+          lines: 1,
           preview: "hi",
           length: 2,
         });
@@ -1931,9 +1937,68 @@ describe("createEventBridge", () => {
         expect(resultPayload(markerTexts(bridge)[1]!)).toEqual({
           id: "t1",
           status: "ok",
+          tool: "Read",
+          summary: "empty",
           preview: "",
           length: 0,
         });
+      });
+
+      /**
+       * `tool_use_result` rides on the ENVELOPE, one level above the block it
+       * describes, so it can only be attributed when the envelope carries a
+       * single result. A batched envelope must fall back to counting text
+       * rather than labelling one tool's outcome with another's metrics.
+       */
+      it("reads the envelope's tool_use_result into metrics", () => {
+        const bridge = createBridgeWithStart();
+        assistantToolUse(bridge, "t1");
+        bridge.handleUserEnvelope({
+          type: "user",
+          message: {
+            content: [
+              { type: "tool_result", tool_use_id: "t1", content: "1\talpha" },
+            ],
+          },
+          tool_use_result: {
+            type: "text",
+            file: {
+              filePath: "/repo/a.txt",
+              numLines: 40,
+              startLine: 1,
+              totalLines: 400,
+            },
+          },
+        });
+        expect(resultPayload(markerTexts(bridge)[1]!)).toMatchObject({
+          tool: "Read",
+          summary: "lines 1-40 of 400",
+          path: "/repo/a.txt",
+          lines: 40,
+          totalLines: 400,
+        });
+      });
+
+      it("ignores tool_use_result when one envelope carries two results", () => {
+        const bridge = createBridgeWithStart();
+        assistantToolUse(bridge, "t1");
+        assistantToolUse(bridge, "t2", "Bash");
+        bridge.handleUserEnvelope({
+          type: "user",
+          message: {
+            content: [
+              { type: "tool_result", tool_use_id: "t1", content: "one" },
+              { type: "tool_result", tool_use_id: "t2", content: "two" },
+            ],
+          },
+          tool_use_result: { stdout: "two", stderr: "", interrupted: false },
+        });
+        const payloads = markerTexts(bridge).slice(2).map(resultPayload);
+        expect(payloads.map((p: any) => p.summary)).toEqual([
+          "1 line",
+          "1 line",
+        ]);
+        expect(payloads.every((p: any) => p.bytes === undefined)).toBe(true);
       });
     });
   });
