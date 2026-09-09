@@ -117,15 +117,22 @@ const MEASURED_FIELDS: Record<string, "lines" | "bytes"> = {
   plan: "lines",
 };
 
+/**
+ * Clip one value, keeping its newlines.
+ *
+ * Collapsing whitespace here would spend less of the budget on a shell
+ * heredoc, and it costs more than it saves: a front-end picks the OPERATIVE
+ * line out of a multi-line command (skipping the `cd`/`export` preamble) and
+ * counts the rest as "+N more". Flattened to one line, that logic sees a
+ * single line and puts the setup on the row instead of the work. The marker
+ * stays one line regardless — `JSON.stringify` escapes the newlines.
+ */
 function clip(value: string, limit: number, keep: "head" | "tail"): string {
-  // Newlines survive JSON.stringify as `\n`, which is legal but doubles the
-  // apparent length of a shell heredoc; collapse runs of whitespace so the
-  // budget is spent on content.
-  const flat = value.replace(/\s+/g, " ").trim();
-  if (flat.length <= limit) return flat;
+  const text = value.trim();
+  if (text.length <= limit) return text;
   return keep === "tail"
-    ? `…${flat.slice(-(limit - 1))}`
-    : `${flat.slice(0, limit - 1)}…`;
+    ? `…${text.slice(-(limit - 1))}`
+    : `${text.slice(0, limit - 1)}…`;
 }
 
 function countLines(text: string): number {

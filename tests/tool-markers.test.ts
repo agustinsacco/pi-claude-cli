@@ -76,11 +76,18 @@ describe("buildCallPayload", () => {
     });
   });
 
-  it("collapses newlines in a multi-line command", () => {
-    const payload = parse(
-      buildCallPayload("Bash", { command: "set -e\ncd /tmp\nls -la\n" }),
-    );
-    expect(payload.command).toBe("set -e cd /tmp ls -la");
+  /**
+   * A front-end picks the OPERATIVE line out of a multi-line command and
+   * counts the rest as "+N more". Flatten the newlines here and it puts the
+   * `cd`/`export` preamble on the row instead of the work. The marker stays
+   * one line either way: JSON.stringify escapes them.
+   */
+  it("keeps the newlines of a multi-line command", () => {
+    const json = buildCallPayload("Bash", {
+      command: "set -e\ncd /tmp\nls -la\n",
+    });
+    expect(json.includes("\n")).toBe(false);
+    expect(parse(json).command).toBe("set -e\ncd /tmp\nls -la");
   });
 
   it("measures a written file instead of dumping its contents", () => {
