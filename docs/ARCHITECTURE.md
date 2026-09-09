@@ -7,12 +7,14 @@ the way it is.
 ## The inversion
 
 pi normally streams from a provider API. This extension implements pi's
-`streamSimple` contract by spawning a **fresh `claude -p` subprocess per LLM
-turn** and translating its stdout back into pi's stream events. Claude Code
-is demoted from "agent" to "model server": it contributes model access, the
-user's Pro/Max entitlement and prompt caching, while **pi keeps the agent
-loop, the tools, the session file, compaction, forks and everything a
-front-end sees**.
+`streamSimple` contract using a **persistent `claude -p` process per session**
+and translating its stdout into pi stream events. Claude Code remains an
+agent: it owns native tools, its default prompt, and a separate transcript
+and compaction lifecycle. pi executes custom handoff tools and remains the
+front-end's system of record.
+
+The opt-in [pi context policy](CONTEXT-POLICY.md) (0.7.1+) consolidates project,
+skill and integration discovery without replacing that native execution model.
 
 Registration happens twice in `index.ts`, because pi 0.84 has two dispatch
 paths:
@@ -212,11 +214,11 @@ settled items.
 
 ## Tools: the three-way split
 
-**Built-ins** are pure renaming (`tool-mapping.ts` is the single source of
+**Built-in name translation** (`tool-mapping.ts` is the single source of
 truth): `Read→read` (`file_path→path`), `Write→write`, `Edit→edit`
 (`old_string→oldText`, `new_string→newText`), `Bash→bash`, `Grep→grep`
 (`head_limit→limit`), `Glob→find`. Claude proposes them under its names; pi
-executes under its own.
+records their activity as markers; the CLI executes them natively.
 
 **Custom pi tools** (anything a pi extension registered — a front-end's
 artifact tools, MCP-adapter tools) cannot be renamed into Claude's

@@ -30,7 +30,7 @@ vi.mock("cross-spawn", () => ({
 }));
 
 vi.mock("node:child_process", () => ({
-  execSync: vi.fn(() => Buffer.from("1.0.0")),
+  execSync: vi.fn(() => Buffer.from("2.1.263 (Claude Code)")),
 }));
 
 const { MockStream } = vi.hoisted(() => {
@@ -61,6 +61,8 @@ import {
 } from "../src/handoff-broker";
 import type { HandoffResult } from "../src/handoff-broker";
 import { resetMcpConfigCache } from "../src/mcp-config";
+import { getSystemPrompt } from "../src/session-map";
+import { PI_CONTEXT_MARKER } from "../src/context-policy";
 
 const model = {
   id: "claude-opus-5",
@@ -160,9 +162,87 @@ describe("persistent CLI process", () => {
     vi.useRealTimers();
     delete process.env.PI_CLAUDE_CLI_STATE_DIR;
     delete process.env.PI_CLAUDE_CLI_SYSTEM_PROMPT;
+    delete process.env.PI_CLAUDE_CLI_CONTEXT;
     delete process.env.PI_CLAUDE_CLI_KEEPALIVE_MS;
     delete process.env.PI_CLAUDE_CLI_HANDOFF_PROXY;
     rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  describe("pi context continuity", () => {
+    it("keeps the aligned prompt and warm process across follow-up turns", async () => {
+      process.env.PI_CLAUDE_CLI_CONTEXT = "pi";
+      const ctx = {
+        systemPrompt: "PI-PROJECT-SENTINEL",
+        messages: [{ role: "user", content: "first" }],
+      };
+      streamViaCli(model, ctx, opts("pi-context") as any);
+      await vi.advanceTimersByTimeAsync(0);
+      const proc = procAt(0);
+      const saved = getSystemPrompt(cliIdOf(0));
+      expect(saved).toContain(PI_CONTEXT_MARKER);
+      expect(saved).toContain("PI-PROJECT-SENTINEL");
+      proc.stdout.write(
+        startCycle({ input_tokens: 1 }) +
+          text("one") +
+          endCycle("end_turn") +
+          result({}),
+      );
+      await vi.advanceTimersByTimeAsync(10);
+      const next = {
+        ...ctx,
+        messages: [
+          ...ctx.messages,
+          ourAssistant(doneOf(0).message.content),
+          { role: "user", content: "second" },
+        ],
+      };
+      streamViaCli(model, next, opts("pi-context") as any);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(spawn).toHaveBeenCalledTimes(1);
+      expect(getSystemPrompt(cliIdOf(0))).toBe(saved);
+      proc.stdout.write(
+        startCycle({ input_tokens: 1 }) +
+          text("two") +
+          endCycle("end_turn") +
+          result({}),
+      );
+      await vi.advanceTimersByTimeAsync(10);
+      expect(doneOf(1).message.stopReason).toBe("stop");
+    });
+
+    it("refuses a legacy-to-pi policy change as a valid error message, not a raw string", async () => {
+      const ctx = {
+        systemPrompt: "LEGACY",
+        messages: [{ role: "user", content: "first" }],
+      };
+      streamViaCli(model, ctx, opts("pi-old") as any);
+      await vi.advanceTimersByTimeAsync(0);
+      procAt(0).stdout.write(
+        startCycle({ input_tokens: 1 }) +
+          text("one") +
+          endCycle("end_turn") +
+          result({}),
+      );
+      await vi.advanceTimersByTimeAsync(10);
+      process.env.PI_CLAUDE_CLI_CONTEXT = "pi";
+      streamViaCli(
+        model,
+        {
+          ...ctx,
+          messages: [
+            ...ctx.messages,
+            ourAssistant(doneOf(0).message.content),
+            { role: "user", content: "second" },
+          ],
+        },
+        opts("pi-old") as any,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(spawn).toHaveBeenCalledTimes(1);
+      expect(doneOf(1).message.stopReason).toBe("error");
+      expect(doneOf(1).message.errorMessage).toContain("fresh pi session");
+      expect(Array.isArray(doneOf(1).message.content)).toBe(true);
+    });
   });
 
   describe("proxied handoff", () => {

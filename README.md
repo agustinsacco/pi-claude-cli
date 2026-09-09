@@ -101,11 +101,11 @@ status key.
 
 ## What your Claude environment contributes
 
-Each turn runs a real `claude -p` subprocess in your workspace, so your
-Claude Code environment participates through three doors:
+By default a real `claude -p` process lives across turns in your workspace,
+so your Claude Code environment participates through three doors:
 
-1. **Bridged tools** — the six built-ins (Read/Write/Edit/Bash/Grep/Glob)
-   and pi custom tools become pi tool calls; pi executes them.
+1. **Tools** — the six built-ins (Read/Write/Edit/Bash/Grep/Glob) execute
+   natively in Claude Code. Only custom pi tools become pi tool calls.
 2. **CLI-side execution** — your personal/project MCP servers, WebSearch,
    and sub-agents run _inside_ the CLI between cycles. They appear in the
    transcript as one-line markers (`[Claude Code · WebSearch {…}]`) and
@@ -113,6 +113,19 @@ Claude Code environment participates through three doors:
 3. **Prompt-level osmosis** — the CLI auto-loads project CLAUDE.md and
    memory, your hooks fire, and skills can load twice (natively via
    claude, and again via pi's own `~/.claude/skills` support).
+
+### Pi context with native tools (0.7.1+)
+
+`PI_CLAUDE_CLI_CONTEXT=pi` makes pi the source for project instructions,
+skills and custom integrations, while **retaining Claude Code's default prompt
+and native tools**. The generated pi tool guidance is aligned to native schemas;
+artifact guidance, user instructions and `.pi` paths are preserved. Duplicate
+Claude discovery is disabled, but explicit host guards remain enabled.
+
+Requires Claude Code **2.1.263+**. Hosts must retain pi context-file discovery
+(no `--no-context-files`) and start fresh sessions when changing policies. Do not combine this with system-prompt
+replacement or bare mode. See [the context-policy contract](docs/CONTEXT-POLICY.md)
+for launch controls, limitations, and the opt-in live verification.
 
 ### Hermetic mode
 
