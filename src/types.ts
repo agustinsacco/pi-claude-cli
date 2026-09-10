@@ -97,6 +97,22 @@ export interface ClaudeUserEnvelope {
       is_error?: boolean;
     }>;
   };
+  /**
+   * The CLI's own structured record of what the tool did — the same object it
+   * writes to its transcript as `toolUseResult`, published here in snake_case
+   * BESIDE (not inside) the `tool_result` block.
+   *
+   * The shape depends on the tool and is undocumented, so it stays `unknown`
+   * and is read defensively by `src/tool-markers.ts`, which turns the shapes
+   * it recognises into metrics: a read's `numLines`/`totalLines`, an edit's
+   * `structuredPatch`, a command's `stdout`/`stderr`/`interrupted`, a glob's
+   * `numFiles`. A failed Bash reports a plain STRING here
+   * ("Error: Exit code 1\n…") — the only place its exit code appears.
+   *
+   * Optional: an older CLI may not send it, and the marker builder degrades
+   * to counting the result text.
+   */
+  tool_use_result?: unknown;
 }
 
 export interface ClaudeSystemMessage {

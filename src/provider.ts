@@ -528,7 +528,7 @@ export function streamViaCli(
 
       // ---- 3. The episode: one pi call's view of the process
       const bridge = createEventBridge(stream, model, {
-        markedToolIds: live.markedToolIds,
+        markedTools: live.markedTools,
       });
       const taskTracker = live.taskTracker;
       // Usage earlier episodes of this CLI turn already handed to pi. The
