@@ -29,7 +29,12 @@ import {
   resetMcpConfigCache,
 } from "../src/mcp-config";
 import type { McpToolDef } from "../src/mcp-config";
-import { resetRuntimeDirForTests, RUNTIME_FILE_MODE } from "../src/runtime-dir";
+import { basename, dirname } from "node:path";
+import {
+  runtimeDir,
+  resetRuntimeDirForTests,
+  RUNTIME_FILE_MODE,
+} from "../src/runtime-dir";
 
 /** Every file this module stages must be owner-only. */
 function expectOwnerOnly(call: unknown[]): void {
@@ -228,8 +233,10 @@ describe("writeMcpConfig", () => {
       expect.stringContaining("pi-claude-"),
     );
     for (const call of mocks.writeFileSync.mock.calls) {
-      // Never a pid-derived path directly in /tmp.
-      expect(String(call[0])).toMatch(/pi-claude-[^/]+\/[^/]+$/);
+      // Directly inside the private directory, never a pid-derived path in
+      // bare tmpdir. Compared through `dirname` rather than a regex because
+      // Windows separates with `\`.
+      expect(dirname(String(call[0]))).toBe(runtimeDir());
       expectOwnerOnly(call);
     }
   });
@@ -477,8 +484,10 @@ describe("writeSessionMcpConfig", () => {
       "../../etc/cron.d/evil",
       "/tmp/schema.json",
     );
-    // Separators are what let a name escape; `..` inside one filename cannot.
-    expect(path).toMatch(/^\/tmp\/pi-claude-[^/]+\/[^/]+\.json$/);
+    // Separators are what let a name escape, and `\` is one of them on
+    // Windows; `..` inside a single filename cannot traverse anywhere.
+    expect(dirname(path)).toBe(runtimeDir());
+    expect(basename(path)).toMatch(/^mcp-config-.+\.json$/);
   });
 
   it("omits the socket arguments when no handoff socket is given", async () => {
