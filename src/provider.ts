@@ -55,7 +55,7 @@ import type {
   TaskTrackerState,
 } from "./types.js";
 import { mapThinkingEffort } from "./thinking-config.js";
-import { isHandoffClaudeTool } from "./tool-mapping.js";
+import { isHandoffClaudeTool, mapClaudeToolNameToPi } from "./tool-mapping.js";
 import { resolveAutocompact } from "./autocompact.js";
 import {
   getCliSession,
@@ -78,6 +78,7 @@ import {
   type EpisodeSink,
 } from "./cli-process.js";
 import type { HandoffResult } from "./handoff-broker.js";
+import { handoffSecretFile } from "./handoff-broker.js";
 import { randomUUID } from "node:crypto";
 
 /**
@@ -492,6 +493,7 @@ export function streamViaCli(
                 cliSessionId,
                 options.mcpConfig.schemaPath,
                 allowHandoff ? handoffSocketPath : undefined,
+                allowHandoff ? handoffSecretFile() : undefined,
               )
             : undefined);
 
@@ -764,7 +766,10 @@ export function streamViaCli(
               if (toolName && isHandoffClaudeTool(toolName)) {
                 sawHandoffTool = true;
                 const id = msg.event.content_block.id;
-                if (id) live.noteHandoffToolUse(id);
+                // The broker sees the MCP-side (unprefixed) name, so record
+                // the same form the schema server will send back.
+                if (id)
+                  live.noteHandoffToolUse(id, mapClaudeToolNameToPi(toolName));
               }
             }
 

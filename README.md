@@ -240,6 +240,15 @@ parked and the next user message goes to the same stdin. Measured live
 (`tests/live-persistent.test.ts`): a turn after a commit costs 91 cache-write
 tokens on the persistent process versus 8,827 on a fresh one.
 
+Reaching that socket means being able to make pi run a tool, so since 0.8.2 it
+is private. The socket, the tool schemas, every `--mcp-config` and every staged
+system prompt live in a randomly-named `0700` per-process directory and are
+written `0600`; each request carries a per-process secret, which the schema
+server reads from a file rather than taking on its command line (argv is
+world-readable). Before that they were pid-named files in a shared `/tmp` with
+default permissions — see
+[the runtime directory](docs/ARCHITECTURE.md#the-runtime-directory-and-who-may-reach-the-broker).
+
 | Variable                        | Default   | Meaning                                                                                                                                    |
 | ------------------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | `PI_CLAUDE_CLI_KEEPALIVE_MS`    | `600000`  | How long a parked process waits for the next turn. `0`/`off`: end it at `result` as before (handoffs still keep it alive within a turn).   |

@@ -9,9 +9,8 @@
 import spawn from "cross-spawn";
 import { execSync } from "node:child_process";
 import { writeFileSync, unlinkSync } from "node:fs";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
 import type { ChildProcess } from "node:child_process";
+import { runtimeFile, RUNTIME_FILE_MODE } from "./runtime-dir.js";
 import {
   DEFAULT_SYSTEM_PROMPT_MODE,
   type SystemPromptMode,
@@ -61,8 +60,13 @@ function isStrictMcp(): boolean {
 export const DEFAULT_MCP_TOOL_TIMEOUT_MS = 3_600_000;
 
 function systemPromptFilePath(sessionKey?: string): string {
-  const suffix = sessionKey ? `-${sessionKey}` : "";
-  return join(tmpdir(), `pi-claude-cli-sysprompt-${process.pid}${suffix}.txt`);
+  // In the private 0700 runtime directory, written 0600: the prompt carries
+  // pi's instructions and the host's project context, which used to sit in a
+  // world-readable /tmp file under a pid-derived name.
+  const suffix = sessionKey
+    ? `-${sessionKey.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 128)}`
+    : "";
+  return runtimeFile(`pi-claude-cli-sysprompt${suffix}.txt`);
 }
 
 export function spawnClaude(
@@ -172,7 +176,10 @@ export function spawnClaude(
     const tmpFile = systemPromptFilePath(
       options?.resumeSessionId ?? options?.newSessionId,
     );
-    writeFileSync(tmpFile, systemPrompt, "utf-8");
+    writeFileSync(tmpFile, systemPrompt, {
+      encoding: "utf-8",
+      mode: RUNTIME_FILE_MODE,
+    });
     // `pi` mode replaces Claude Code's prompt outright; `claude` mode layers
     // pi's on top of it. See src/system-prompt-mode.ts for the trade-off.
     const mode = options?.systemPromptMode ?? DEFAULT_SYSTEM_PROMPT_MODE;

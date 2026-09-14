@@ -232,6 +232,38 @@ pi has run the tool (0.7.0). Before that it could only refuse, and the
 provider had to interrupt the CLI and resume a new process with the result
 pasted in as user text — see "One process per pi session".
 
+### The runtime directory and who may reach the broker
+
+Anything that can reach the broker socket can ask pi to execute a tool, so the
+socket is not a public surface. Every runtime artifact — the socket, the tool
+schemas, each session's `--mcp-config`, each spawn's system prompt, the broker
+secret — lives in one private per-process directory created by
+`src/runtime-dir.ts`:
+
+- `mkdtempSync(join(tmpdir(), "pi-claude-"))` — random name, mode `0700`, so
+  the path cannot be derived from the pid and no other local user can traverse
+  into it. Files inside are written `0600`, and the socket is `chmod`ded `0600`
+  after bind (a bind honours the umask, so a stock `umask 022` box would
+  otherwise leave it `0755`).
+- Every request must carry the process's 32-byte `secret`, compared with
+  `timingSafeEqual` **before** the session id reaches any routing table. The
+  schema server receives the secret as a **file path**, never as a command-line
+  argument: argv is world-readable through `ps` and `/proc`, which would hand
+  the secret to exactly the user the directory mode keeps out.
+- The directory is removed on exit. A `SIGKILL`ed process leaks it, but leaks a
+  `0700` directory nobody else can open.
+
+Until 0.8.2 these were pid-named files written straight into `os.tmpdir()` with
+whatever the umask allowed — on Linux a `0755` socket and `0644` configs in a
+world-readable `/tmp`, and the config names the socket and the CLI session id
+(reported as agustinsacco/pi-claude-cli#35). macOS was unaffected in practice:
+`TMPDIR` there is already a per-user `0700` directory.
+
+Windows has no mode bits for a named pipe and Node exposes no ACL for one, so
+there the random pipe name and the secret are the whole of the defence. That
+asymmetry is why the secret check exists at all rather than relying on file
+permissions alone.
+
 **Everything else** — WebSearch, WebFetch, ToolSearch, `Task` sub-agents,
 the user's own MCP servers — is executed **by the CLI itself**, mid-episode.
 These are surfaced as one-line marker text blocks so transcripts show what
@@ -457,7 +489,8 @@ time; within one process it never does.
 
 - **Through a handoff.** The permission for `mcp__custom-tools__*` is now
   ALLOWED. The CLI calls `tools/call`; the schema server forwards it over the
-  broker socket with the CLI session id and `_meta["claudecode/toolUseId"]`;
+  broker socket with the CLI session id, `_meta["claudecode/toolUseId"]` and
+  the broker secret;
   pi's stream ends at `message_stop` with `stopReason: toolUse` exactly as
   before, pi runs the tool, and the next `streamSimple` call — whose delta is
   precisely the toolResults for the awaited ids — attaches to the same
@@ -465,6 +498,16 @@ time; within one process it never does.
   before pi's result (held as pending) or after (held as ready). The CLI
   transcript records a real `tool_result`; the rejected-tool /
   `[Request interrupted]` / `No response requested.` filler is gone.
+
+  The `toolUseId` must name a `tool_use` block this process actually streamed
+  and has not answered yet, and must ask for the tool that block named.
+  Anything else is refused immediately. Before 0.8.2 an unmatched id was
+  parked in `pending`, where nothing would ever deliver a result for it and
+  the caller blocked until the MCP tool timeout — an hour by default. A
+  sub-agent's nested custom-tool call lands here: pi never sees non-top-level
+  `tool_use` ids, so it could never answer one. It now gets an error rather
+  than a stall.
+
 - **Across turns.** After `result` the process is parked
   (`PI_CLAUDE_CLI_KEEPALIVE_MS`, default 10 min). The next call whose delta
   is a user message writes it to the same stdin. Verified live: a commit

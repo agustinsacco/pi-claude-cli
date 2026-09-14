@@ -25,9 +25,8 @@ vi.mock("node:child_process", () => ({
 
 import spawn from "cross-spawn";
 import { execSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { dirname } from "node:path";
 import {
   spawnClaude,
   sendInterrupt,
@@ -101,7 +100,20 @@ describe("spawnClaude", () => {
 
     expect(args).toContain("--append-system-prompt-file");
     const idx = args.indexOf("--append-system-prompt-file");
-    expect(args[idx + 1]).toContain("pi-claude-cli-sysprompt-");
+    expect(args[idx + 1]).toContain("pi-claude-cli-sysprompt");
+  });
+
+  it("stages the system prompt owner-only in the private runtime directory", () => {
+    if (process.platform === "win32") return;
+    spawnClaude("claude-sonnet-4-5-20250929", "You are a helpful assistant.");
+    const args = (spawn as any).mock.calls[0][1] as string[];
+    const file = args[args.indexOf("--append-system-prompt-file") + 1];
+
+    // It used to be a pid-named file straight in a world-readable /tmp, and
+    // it carries pi's instructions plus the host's project context.
+    expect(file).toMatch(/pi-claude-[^/]+\/pi-claude-cli-sysprompt[^/]*\.txt$/);
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    expect(statSync(dirname(file)).mode & 0o777).toBe(0o700);
   });
 
   it("never passes a path to the STRING form of either flag", () => {
@@ -134,10 +146,8 @@ describe("spawnClaude", () => {
 
   it("temp file contains the system prompt text", () => {
     spawnClaude("claude-sonnet-4-5-20250929", "You are a helpful assistant.");
-    const tmpFile = join(
-      tmpdir(),
-      `pi-claude-cli-sysprompt-${process.pid}.txt`,
-    );
+    const args = (spawn as any).mock.calls[0][1] as string[];
+    const tmpFile = args[args.indexOf("--append-system-prompt-file") + 1];
     expect(existsSync(tmpFile)).toBe(true);
     expect(readFileSync(tmpFile, "utf-8")).toBe("You are a helpful assistant.");
   });
@@ -718,11 +728,12 @@ describe("sendInterrupt", () => {
 });
 
 describe("cleanupSystemPromptFile", () => {
-  const tmpFile = join(tmpdir(), `pi-claude-cli-sysprompt-${process.pid}.txt`);
-
   it("deletes the temp file when it exists", () => {
     // Create the file by spawning with a system prompt
+    (spawn as any).mockClear();
     spawnClaude("claude-sonnet-4-5-20250929", "test prompt");
+    const args = (spawn as any).mock.calls[0][1] as string[];
+    const tmpFile = args[args.indexOf("--append-system-prompt-file") + 1];
     expect(existsSync(tmpFile)).toBe(true);
 
     cleanupSystemPromptFile();
