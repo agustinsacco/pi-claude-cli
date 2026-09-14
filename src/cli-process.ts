@@ -41,6 +41,10 @@ import {
 } from "./handoff-broker.js";
 import type { NdjsonMessage } from "./types.js";
 
+/** Refusal for a `tools/call` that names no live tool_use block of ours. */
+export const UNMATCHED_CALL_MESSAGE =
+  "pi could not match this tool call to an assistant tool_use block";
+
 /** Four token counters, the shape both `usage` and `modelUsage` reduce to. */
 export interface Usage4 {
   input_tokens: number;
@@ -151,6 +155,8 @@ export class CliProcess implements HandoffTarget {
   private buffer: NdjsonMessage[] = [];
   /** Handoff tool_use ids seen in the current assistant message. */
   private awaiting = new Set<string>();
+  /** pi tool name the model asked for, by tool_use id. */
+  private awaitedNames = new Map<string, string>();
   /** `tools/call` arrived, pi has not answered yet. */
   private pending = new Map<string, HandoffCall>();
   /** pi answered, `tools/call` has not arrived yet. */
@@ -251,9 +257,17 @@ export class CliProcess implements HandoffTarget {
 
   // ---- handoff bookkeeping ------------------------------------------------
 
-  /** A handoff tool_use block streamed in the current assistant message. */
-  noteHandoffToolUse(toolUseId: string): void {
+  /**
+   * A handoff tool_use block streamed in the current assistant message.
+   *
+   * `piToolName` is what the model actually asked for. Recording it lets
+   * `onHandoffCall` refuse a call that names a different tool than the block
+   * it claims to answer — a peer on the broker socket cannot borrow a live
+   * tool_use id to get some other tool executed.
+   */
+  noteHandoffToolUse(toolUseId: string, piToolName?: string): void {
     this.awaiting.add(toolUseId);
+    if (piToolName) this.awaitedNames.set(toolUseId, piToolName);
   }
 
   /** Can pi's toolResults for these ids continue the running turn? */
@@ -285,14 +299,28 @@ export class CliProcess implements HandoffTarget {
       // shape is unambiguous, otherwise refuse rather than guess.
       const ids = [...this.awaiting, ...this.ready.keys()];
       if (ids.length !== 1) {
-        call.respond(
-          errorResult(
-            "pi could not match this tool call to an assistant tool_use block",
-          ),
-        );
+        call.respond(errorResult(UNMATCHED_CALL_MESSAGE));
         return;
       }
       this.routeCall(ids[0], call);
+      return;
+    }
+    // An id must name a tool_use block this process actually streamed and has
+    // not answered yet. Anything else — an id from a sub-agent's nested block,
+    // a replayed id, a value invented by whoever reached the socket — is
+    // refused. It used to land in `pending`, where nothing would ever deliver
+    // a result for it and the caller blocked until the MCP timeout (an hour).
+    if (!this.awaiting.has(id) && !this.ready.has(id)) {
+      call.respond(errorResult(UNMATCHED_CALL_MESSAGE));
+      return;
+    }
+    const expected = this.awaitedNames.get(id);
+    if (expected && call.name && call.name !== expected) {
+      call.respond(
+        errorResult(
+          `pi refused this tool call: tool_use ${id} asked for "${expected}", not "${call.name}"`,
+        ),
+      );
       return;
     }
     this.routeCall(id, call);
@@ -300,6 +328,7 @@ export class CliProcess implements HandoffTarget {
 
   private routeCall(id: string, call: HandoffCall): void {
     this.awaiting.delete(id);
+    this.awaitedNames.delete(id);
     const ready = this.ready.get(id);
     if (ready) {
       this.ready.delete(id);
@@ -315,6 +344,7 @@ export class CliProcess implements HandoffTarget {
       call.respond(errorResult(message));
     this.pending.clear();
     this.awaiting.clear();
+    this.awaitedNames.clear();
     this.ready.clear();
   }
 

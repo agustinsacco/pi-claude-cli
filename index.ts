@@ -20,6 +20,7 @@ import {
   cleanupMcpConfigFiles,
 } from "./src/mcp-config.js";
 import { startHandoffBroker, stopHandoffBroker } from "./src/handoff-broker.js";
+import { cleanupRuntimeDir } from "./src/runtime-dir.js";
 import { retireAllCliProcesses } from "./src/cli-process.js";
 import { rewriteOverflowMessage } from "./src/overflow.js";
 import { buildRateLimitPayload, rateLimitIdentity } from "./src/rate-limit.js";
@@ -31,6 +32,8 @@ process.on("exit", killAllProcesses);
 process.on("exit", cleanupMcpConfigFiles);
 // Close the handoff socket and remove its file
 process.on("exit", stopHandoffBroker);
+// Last: take the private runtime directory itself, socket and secret included.
+process.on("exit", cleanupRuntimeDir);
 // Parked CLI processes hold their stdin from us: ending pi ends them (the
 // pipe closes and the CLI exits), but retire cleanly when we can.
 process.on("beforeExit", () => {

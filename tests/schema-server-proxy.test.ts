@@ -43,9 +43,13 @@ function rpc(proc: ChildProcess) {
     });
 }
 
+/** Stand-in for the broker's per-process secret. */
+const SECRET = "a".repeat(64);
+
 describe("mcp-schema-server.cjs", () => {
   let dir: string;
   let schemaPath: string;
+  let secretPath: string;
   let broker: Server | undefined;
   let sockPath: string;
   const seen: any[] = [];
@@ -53,6 +57,8 @@ describe("mcp-schema-server.cjs", () => {
   beforeAll(async () => {
     dir = mkdtempSync(join(tmpdir(), "pcc-schema-"));
     schemaPath = join(dir, "schema.json");
+    secretPath = join(dir, "handoff.secret");
+    writeFileSync(secretPath, SECRET, { mode: 0o600 });
     writeFileSync(
       schemaPath,
       JSON.stringify([
@@ -131,9 +137,11 @@ describe("mcp-schema-server.cjs", () => {
   });
 
   it("with a socket, tools/call is forwarded to pi with the session and tool_use id, and the result relayed", async () => {
-    const proc = spawn("node", [SERVER, schemaPath, sockPath, "cli-sess-42"], {
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    const proc = spawn(
+      "node",
+      [SERVER, schemaPath, sockPath, "cli-sess-42", secretPath],
+      { stdio: ["pipe", "pipe", "pipe"] },
+    );
     try {
       const call = rpc(proc);
       const res = await call("tools/call", {
@@ -148,10 +156,42 @@ describe("mcp-schema-server.cjs", () => {
       expect(seen[seen.length - 1]).toEqual({
         type: "call",
         session: "cli-sess-42",
+        secret: SECRET,
         toolUseId: "toolu_9",
         name: "search",
         arguments: { q: "x" },
       });
+    } finally {
+      proc.kill("SIGKILL");
+    }
+  });
+
+  it("reads the secret from its file, so it never appears in the server's argv", async () => {
+    const proc = spawn(
+      "node",
+      [SERVER, schemaPath, sockPath, "cli-sess-43", secretPath],
+      { stdio: ["pipe", "pipe", "pipe"] },
+    );
+    try {
+      // argv is readable by every local user through `ps`; only a path to the
+      // 0600 secret file may appear there.
+      expect(proc.spawnargs.join(" ")).not.toContain(SECRET);
+      const call = rpc(proc);
+      await call("tools/call", { name: "search", arguments: {} });
+      expect(seen[seen.length - 1].secret).toBe(SECRET);
+    } finally {
+      proc.kill("SIGKILL");
+    }
+  });
+
+  it("sends an empty secret when no secret file was given, so the broker refuses it", async () => {
+    const proc = spawn("node", [SERVER, schemaPath, sockPath, "cli-sess-44"], {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    try {
+      const call = rpc(proc);
+      await call("tools/call", { name: "search", arguments: {} });
+      expect(seen[seen.length - 1].secret).toBe("");
     } finally {
       proc.kill("SIGKILL");
     }

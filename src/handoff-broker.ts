@@ -28,12 +28,28 @@
  * never see each other's calls. A call with no registered target is answered
  * with an error immediately: the CLI must never hang on a tool pi will not
  * execute.
+ *
+ * Access control. Anything that can reach the socket can ask pi to run a tool,
+ * so the socket is not a public surface:
+ *
+ *   - it lives in this process's private `0700` runtime directory under a
+ *     random name (src/runtime-dir.ts), and is chmodded `0600` after bind, so
+ *     no other local user can open it;
+ *   - every request must carry this process's `secret`, compared in constant
+ *     time. The secret is handed to the schema server as a FILE PATH, never on
+ *     its command line: argv is world-readable through `ps` and `/proc`, which
+ *     would hand the secret to exactly the user the socket mode keeps out.
+ *
+ * Windows has no mode bits for a named pipe and Node exposes no ACL, so there
+ * the random pipe name and the secret are the whole defence. That is weaker
+ * than the unix path and is the reason the secret check exists at all rather
+ * than relying on file permissions alone.
  */
 
 import { createServer, type Server, type Socket } from "node:net";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { unlinkSync } from "node:fs";
+import { chmodSync, unlinkSync, writeFileSync } from "node:fs";
+import { randomBytes, timingSafeEqual } from "node:crypto";
+import { runtimeFile, RUNTIME_FILE_MODE } from "./runtime-dir.js";
 
 /** One MCP `tools/call` waiting for pi's result. */
 export interface HandoffCall {
@@ -82,6 +98,45 @@ export function errorResult(message: string): HandoffResult {
 export const NO_TARGET_MESSAGE =
   "pi is not attached to this Claude session; the tool was not executed.";
 
+export const UNAUTHORIZED_MESSAGE =
+  "unauthorized handoff request: bad or missing secret";
+
+/**
+ * The shared secret every request must carry, minted once per pi process.
+ * 32 bytes: it only has to survive the lifetime of the process, but it is
+ * cheap to make guessing hopeless.
+ */
+let secret: string | undefined;
+
+export function handoffSecret(): string {
+  if (!secret) secret = randomBytes(32).toString("hex");
+  return secret;
+}
+
+let secretPath: string | undefined;
+
+/**
+ * Stage the secret in an owner-only file and return its path, for handing to
+ * the schema server. Written once; the runtime directory sweep removes it.
+ */
+export function handoffSecretFile(): string {
+  if (!secretPath) {
+    const path = runtimeFile("handoff.secret");
+    writeFileSync(path, handoffSecret(), { mode: RUNTIME_FILE_MODE });
+    secretPath = path;
+  }
+  return secretPath;
+}
+
+/** Constant-time compare; length-safe (`timingSafeEqual` throws on a mismatch). */
+function secretMatches(offered: unknown): boolean {
+  if (typeof offered !== "string") return false;
+  const expected = Buffer.from(handoffSecret(), "utf8");
+  const actual = Buffer.from(offered, "utf8");
+  if (actual.length !== expected.length) return false;
+  return timingSafeEqual(expected, actual);
+}
+
 /**
  * Route one incoming call. Exported for tests and for the socket server
  * below; `respond` is wired by the caller.
@@ -112,22 +167,37 @@ let server: Server | undefined;
 let socketPath: string | undefined;
 let starting: Promise<string> | undefined;
 
-/** Per-process socket path: a unix socket, or a named pipe on Windows. */
+/**
+ * Per-process socket path: a unix socket inside the private runtime directory,
+ * or a named pipe on Windows. The Windows name gets random bytes because a
+ * pipe cannot live in a directory we control the mode of — a pid-derived name
+ * would be trivially guessable by any local process.
+ */
 export function defaultSocketPath(): string {
-  const name = `pi-claude-handoff-${process.pid}`;
-  return process.platform === "win32"
-    ? `\\\\.\\pipe\\${name}`
-    : join(tmpdir(), `${name}.sock`);
+  if (process.platform === "win32") {
+    return `\\\\.\\pipe\\pi-claude-handoff-${process.pid}-${randomBytes(12).toString("hex")}`;
+  }
+  return runtimeFile("handoff.sock");
 }
 
-function parseIncoming(line: string):
-  | {
-      session: string;
-      toolUseId: string;
-      name: string;
-      arguments: Record<string, unknown>;
-    }
-  | undefined {
+/**
+ * A request line this large is not a tool call, it is a peer filling our heap.
+ * Real arguments are bounded by what fits in the model's context.
+ */
+const MAX_REQUEST_BYTES = 8 * 1024 * 1024;
+
+/** A connected peer that sends nothing usable is dropped rather than kept. */
+const REQUEST_TIMEOUT_MS = 60_000;
+
+interface IncomingCall {
+  session: string;
+  toolUseId: string;
+  name: string;
+  arguments: Record<string, unknown>;
+  secret: unknown;
+}
+
+function parseIncoming(line: string): IncomingCall | undefined {
   try {
     const msg = JSON.parse(line);
     if (!msg || msg.type !== "call") return undefined;
@@ -144,6 +214,7 @@ function parseIncoming(line: string):
       toolUseId: typeof msg.toolUseId === "string" ? msg.toolUseId : "",
       name: msg.name,
       arguments: args,
+      secret: msg.secret,
     };
   } catch {
     return undefined;
@@ -153,9 +224,14 @@ function parseIncoming(line: string):
 function handleConnection(socket: Socket): void {
   let buffer = "";
   let handled = false;
+  const timer = setTimeout(() => {
+    if (!handled) socket.destroy();
+  }, REQUEST_TIMEOUT_MS);
+  timer.unref?.();
   const finish = (result: HandoffResult) => {
     if (handled) return;
     handled = true;
+    clearTimeout(timer);
     try {
       socket.end(JSON.stringify({ type: "result", ...result }) + "\n");
     } catch {
@@ -167,12 +243,26 @@ function handleConnection(socket: Socket): void {
     if (handled) return;
     buffer += chunk;
     const nl = buffer.indexOf("\n");
-    if (nl === -1) return;
+    if (nl === -1) {
+      if (buffer.length > MAX_REQUEST_BYTES) {
+        handled = true;
+        clearTimeout(timer);
+        socket.destroy();
+      }
+      return;
+    }
     const line = buffer.slice(0, nl);
     buffer = "";
     const incoming = parseIncoming(line);
     if (!incoming) {
       finish(errorResult("malformed handoff request"));
+      return;
+    }
+    // Authenticate before the session id reaches any routing table: an
+    // unauthenticated peer must not learn whether a session exists, and must
+    // never reach a target's `onHandoffCall`.
+    if (!secretMatches(incoming.secret)) {
+      finish(errorResult(UNAUTHORIZED_MESSAGE));
       return;
     }
     dispatchHandoffCall(incoming.session, {
@@ -184,7 +274,9 @@ function handleConnection(socket: Socket): void {
   });
   socket.on("error", () => {
     handled = true;
+    clearTimeout(timer);
   });
+  socket.on("close", () => clearTimeout(timer));
 }
 
 /**
@@ -211,6 +303,16 @@ export function startHandoffBroker(
       reject(err);
     });
     srv.listen(path, () => {
+      // Bind honours the umask, so the socket lands 0755 on a stock Linux box
+      // even inside a 0700 directory. Narrow it explicitly — the directory
+      // mode is the real gate, this is the second lock on the same door.
+      if (process.platform !== "win32") {
+        try {
+          chmodSync(path, RUNTIME_FILE_MODE);
+        } catch {
+          /* a platform that does not chmod sockets; the 0700 dir still holds */
+        }
+      }
       server = srv;
       socketPath = path;
       // The broker must never hold pi's process open on its own.
@@ -233,6 +335,8 @@ export function stopHandoffBroker(): void {
   server = undefined;
   socketPath = undefined;
   starting = undefined;
+  secret = undefined;
+  secretPath = undefined;
   targets.clear();
   try {
     srv?.close();

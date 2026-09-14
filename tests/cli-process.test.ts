@@ -10,6 +10,7 @@ import {
   addUsage,
   subUsage,
   maxUsage,
+  UNMATCHED_CALL_MESSAGE,
 } from "../src/cli-process";
 import {
   dispatchHandoffCall,
@@ -194,6 +195,62 @@ describe("CliProcess", () => {
     const d = call("");
     dispatchHandoffCall("cli-1", d.call);
     expect(d.answers[0].isError).toBe(true);
+  });
+
+  it("refuses a tool_use id this process never streamed, instead of parking it forever", () => {
+    const { cli } = make();
+    cli.writeUser("go");
+    cli.noteHandoffToolUse("t1");
+
+    // An id we never announced: a nested sub-agent block, a replay, or a peer
+    // on the broker socket. It used to land in `pending`, where nothing would
+    // ever answer it and the caller blocked until the MCP timeout.
+    const c = call("toolu_forged");
+    dispatchHandoffCall("cli-1", c.call);
+    expect(c.answers).toHaveLength(1);
+    expect(c.answers[0].isError).toBe(true);
+    expect((c.answers[0].content[0] as any).text).toBe(UNMATCHED_CALL_MESSAGE);
+
+    // The real handoff is untouched by the refusal.
+    const good = call("t1");
+    dispatchHandoffCall("cli-1", good.call);
+    cli.deliverHandoffResult("t1", { content: [{ type: "text", text: "ok" }] });
+    expect(good.answers[0].isError).toBeUndefined();
+  });
+
+  it("refuses a call that borrows a live tool_use id to run a different tool", () => {
+    const { cli } = make();
+    cli.writeUser("go");
+    cli.noteHandoffToolUse("t1", "search");
+
+    const c = call("t1", "bash");
+    dispatchHandoffCall("cli-1", c.call);
+    expect(c.answers[0].isError).toBe(true);
+    expect((c.answers[0].content[0] as any).text).toContain(
+      'asked for "search", not "bash"',
+    );
+
+    // Still answerable by the tool the model actually asked for.
+    const good = call("t1", "search");
+    dispatchHandoffCall("cli-1", good.call);
+    cli.deliverHandoffResult("t1", { content: [{ type: "text", text: "ok" }] });
+    expect(good.answers[0].isError).toBeUndefined();
+  });
+
+  it("refuses a second call replaying an id already answered", () => {
+    const { cli } = make();
+    cli.writeUser("go");
+    cli.noteHandoffToolUse("t1", "search");
+    const first = call("t1", "search");
+    dispatchHandoffCall("cli-1", first.call);
+    cli.deliverHandoffResult("t1", { content: [{ type: "text", text: "ok" }] });
+
+    const replay = call("t1", "search");
+    dispatchHandoffCall("cli-1", replay.call);
+    expect(replay.answers[0].isError).toBe(true);
+    expect((replay.answers[0].content[0] as any).text).toBe(
+      UNMATCHED_CALL_MESSAGE,
+    );
   });
 
   it("flips turnActive off before the episode sees the result, and fails calls left open", async () => {

@@ -17,12 +17,17 @@
  * Config files are per CLI session: each carries the session id so the
  * schema server can route proxied `tools/call` requests back to the right pi
  * session over the handoff socket (src/handoff-broker.ts).
+ *
+ * Every file here is staged in this process's private 0700 runtime directory
+ * and written 0600. A session config names the handoff socket and the CLI
+ * session id — enough, before this was locked down, for another local user to
+ * address the broker directly.
  */
 
 import { writeFileSync, unlinkSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { runtimeFile, RUNTIME_FILE_MODE } from "./runtime-dir.js";
 
 /** The 6 built-in tools that pi handles natively (match pi tool names). */
 const BUILT_IN_TOOL_NAMES = new Set([
@@ -88,19 +93,23 @@ export function getCustomToolDefs(pi: any): McpToolDef[] {
 
 /** Where this process stages the tool schemas the CLI advertises. */
 function schemaFilePath(): string {
-  return join(tmpdir(), `pi-claude-mcp-schemas-${process.pid}.json`);
+  return runtimeFile("mcp-schemas.json");
 }
 
 /** Where this process stages the legacy (session-less) `--mcp-config` file. */
 function configFilePath(): string {
-  return join(tmpdir(), `pi-claude-mcp-config-${process.pid}.json`);
+  return runtimeFile("mcp-config.json");
 }
 
 function sessionConfigFilePath(cliSessionId: string): string {
-  return join(
-    tmpdir(),
-    `pi-claude-mcp-config-${process.pid}-${cliSessionId}.json`,
-  );
+  // The session id reaches us from the CLI. Keep it out of the path so a
+  // hostile value cannot traverse out of the runtime directory.
+  return runtimeFile(`mcp-config-${safeFileSegment(cliSessionId)}.json`);
+}
+
+/** Reduce an id to characters that cannot escape or confuse a path. */
+function safeFileSegment(value: string): string {
+  return value.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 128) || "session";
 }
 
 /** Resolve the schema server .cjs (sibling of this module). */
@@ -117,7 +126,7 @@ export function writeSchemaFile(toolDefs: McpToolDef[]): SchemaFileWrite {
   const schemaJson = JSON.stringify(toolDefs);
   const changed = schemaJson !== lastSchemaJson;
   if (changed) {
-    writeFileSync(schemaFilePath(), schemaJson);
+    writeFileSync(schemaFilePath(), schemaJson, { mode: RUNTIME_FILE_MODE });
     lastSchemaJson = schemaJson;
     schemaVersion++;
   }
@@ -144,7 +153,9 @@ export function writeMcpConfig(toolDefs: McpToolDef[]): McpConfigWrite {
         },
       },
     };
-    writeFileSync(configPath, JSON.stringify(config));
+    writeFileSync(configPath, JSON.stringify(config), {
+      mode: RUNTIME_FILE_MODE,
+    });
     configWritten = true;
   }
 
@@ -155,22 +166,31 @@ export function writeMcpConfig(toolDefs: McpToolDef[]): McpConfigWrite {
  * Write the `--mcp-config` file for ONE CLI session. The schema server gets
  * the handoff socket and the session id so its `tools/call` requests reach
  * the pi session that owns this CLI process. Written once per session id.
+ *
+ * `secretPath` points at the broker's shared secret. It is a path and not the
+ * secret itself because these args become the schema server's argv, which
+ * every local user can read with `ps`.
  */
 export function writeSessionMcpConfig(
   cliSessionId: string,
   schemaPath: string,
   handoffSocketPath?: string,
+  secretPath?: string,
 ): string {
   const existing = sessionConfigPaths.get(cliSessionId);
   if (existing) return existing;
   const configPath = sessionConfigFilePath(cliSessionId);
   const args = handoffSocketPath
-    ? [serverPath(), schemaPath, handoffSocketPath, cliSessionId]
+    ? [serverPath(), schemaPath, handoffSocketPath, cliSessionId, secretPath]
     : [serverPath(), schemaPath];
   const config = {
-    mcpServers: { "custom-tools": { command: "node", args } },
+    mcpServers: {
+      "custom-tools": { command: "node", args: args.filter(Boolean) },
+    },
   };
-  writeFileSync(configPath, JSON.stringify(config));
+  writeFileSync(configPath, JSON.stringify(config), {
+    mode: RUNTIME_FILE_MODE,
+  });
   sessionConfigPaths.set(cliSessionId, configPath);
   return configPath;
 }

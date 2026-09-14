@@ -6,7 +6,12 @@
 //                                       when one is given; otherwise an error
 //                                       result (the CLI must never hang)
 //
-// argv: <schemaPath> [<handoffSocketPath> <cliSessionId>]
+// argv: <schemaPath> [<handoffSocketPath> <cliSessionId> [<secretPath>]]
+//
+// The broker secret arrives as a PATH, never as a literal argument: argv is
+// world-readable via `ps`/`/proc`, and the secret is what stops another local
+// user from driving the broker. The file is 0600 inside pi's 0700 runtime
+// directory, so only this user can read it.
 //
 // The proxy is what keeps the CLI process alive across custom tool calls:
 // the request blocks here until pi has executed the tool and answered, so the
@@ -18,9 +23,21 @@ const fs = require("fs");
 const net = require("net");
 const readline = require("readline");
 
-const [schemaPath, socketPath, cliSessionId] = process.argv.slice(2);
+const [schemaPath, socketPath, cliSessionId, secretPath] =
+  process.argv.slice(2);
 if (!schemaPath) {
   process.exit(1);
+}
+
+// Read once at startup: the broker rejects a call without it, and failing here
+// would only turn a clear "unauthorized" into a mystery hang.
+let secret = "";
+if (secretPath) {
+  try {
+    secret = fs.readFileSync(secretPath, "utf-8").trim();
+  } catch {
+    secret = "";
+  }
 }
 
 let tools = [];
@@ -56,6 +73,7 @@ function proxyCall(id, name, args, toolUseId) {
         JSON.stringify({
           type: "call",
           session: cliSessionId,
+          secret,
           toolUseId,
           name,
           arguments: args,
