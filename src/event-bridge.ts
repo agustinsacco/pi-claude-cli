@@ -5,6 +5,7 @@ import type {
   ClaudeResultMessage,
   ClaudeUsage,
   ClaudeUserEnvelope,
+  ClaudeCompactBoundary,
   TrackedContentBlock,
 } from "./types";
 import { calculateCost } from "@earendil-works/pi-ai";
@@ -67,6 +68,13 @@ export interface EventBridge {
    * tools as expandable rows instead of fire-and-forget lines.
    */
   handleUserEnvelope(envelope: ClaudeUserEnvelope): void;
+  /**
+   * The CLI compacted its own session mid-episode. Resets the reported
+   * context to the compacted size and appends a `[Claude Code · compact {…}]`
+   * marker so a front-end can draw its compaction divider where the cut
+   * actually happened.
+   */
+  handleCompactBoundary(envelope: ClaudeCompactBoundary): void;
   /**
    * Append a pre-built marker text block. Used for sub-agent lifecycle, whose
    * events arrive as top-level `system` envelopes rather than content blocks
@@ -754,6 +762,72 @@ export function createEventBridge(
     }
   }
 
+  /**
+   * Normalize the CLI's compaction record from either spelling (see
+   * `ClaudeCompactBoundary`). Only finite, non-negative numbers count as a
+   * figure; anything else is "not reported" rather than a zero the host
+   * would then believe.
+   */
+  function readCompactMetadata(envelope: ClaudeCompactBoundary): {
+    trigger?: string;
+    preTokens?: number;
+    postTokens?: number;
+    durationMs?: number;
+  } {
+    const raw = (envelope.compact_metadata ??
+      envelope.compactMetadata ??
+      {}) as Record<string, unknown>;
+    const num = (...keys: string[]): number | undefined => {
+      for (const key of keys) {
+        const value = raw[key];
+        if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+          return value;
+        }
+      }
+      return undefined;
+    };
+    return {
+      trigger: typeof raw.trigger === "string" ? raw.trigger : undefined,
+      preTokens: num("pre_tokens", "preTokens"),
+      postTokens: num("post_tokens", "postTokens"),
+      durationMs: num("duration_ms", "durationMs"),
+    };
+  }
+
+  function handleCompactBoundary(envelope: ClaudeCompactBoundary): void {
+    const meta = readCompactMetadata(envelope);
+
+    // The context the model holds NOW is the compacted one. The CLI's
+    // summarization pass is an API call whose prompt is the entire
+    // pre-compaction conversation, and it is the last `message_start` this
+    // bridge sees before the CLI carries on — so left alone, the latch keeps
+    // that prompt as "the last cycle". Captured 2026-09-16: pi was told
+    // 316,760 for a session the CLI had just cut to 37,239, and compacted its
+    // own record on the phantom two minutes later. Bank the finished cycle
+    // first so recomputeUsage() cannot re-latch it.
+    if (meta.postTokens !== undefined && meta.postTokens > 0) {
+      cumulativeUsage.input_tokens += cycleUsage.input_tokens ?? 0;
+      cumulativeUsage.output_tokens += cycleUsage.output_tokens ?? 0;
+      cumulativeUsage.cache_read_input_tokens +=
+        cycleUsage.cache_read_input_tokens ?? 0;
+      cumulativeUsage.cache_creation_input_tokens +=
+        cycleUsage.cache_creation_input_tokens ?? 0;
+      cycleUsage = {};
+      lastCycleContext = meta.postTokens;
+      recomputeUsage();
+    }
+
+    // Same wire shape as every other marker (`[Claude Code · Name {json}]`),
+    // no `#id` tag because nothing pairs with it. Only reported figures go
+    // in: a host must not read an absent `postTokens` as zero.
+    const payload: Record<string, unknown> = {};
+    if (meta.trigger !== undefined) payload.trigger = meta.trigger;
+    if (meta.preTokens !== undefined) payload.preTokens = meta.preTokens;
+    if (meta.postTokens !== undefined) payload.postTokens = meta.postTokens;
+    if (meta.durationMs !== undefined) payload.durationMs = meta.durationMs;
+    appendTextBlock(`[Claude Code · compact ${JSON.stringify(payload)}]`);
+  }
+
   function applyResult(result: ClaudeResultMessage): void {
     // Authoritative spend for the whole episode. `modelUsage` is preferred
     // over `usage` because `usage` is the MAIN AGENT ONLY: sub-agents run
@@ -801,6 +875,7 @@ export function createEventBridge(
     handleEvent,
     handleAssistantEnvelope,
     handleUserEnvelope,
+    handleCompactBoundary,
     appendMarker: appendTextBlock,
     applyResult,
     getOutput: () => output,

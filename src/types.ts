@@ -123,6 +123,27 @@ export interface ClaudeSystemMessage {
 }
 
 /**
+ * The CLI compacted its own session (`--autocompact`, or `/compact`).
+ *
+ * Arrives as a top-level `system` envelope once the summary is in place. It
+ * is a report, not a request: the CLI continues the turn on the compacted
+ * context by itself, nothing is written to stdin to make that happen.
+ *
+ * The metadata is read under both spellings. The transcript on disk writes
+ * `compactMetadata: { preTokens, postTokens, durationMs, trigger }`; every
+ * other structured field the stream carries is snake_case
+ * (`parent_tool_use_id`, `tool_use_result`). A rename on the CLI's side must
+ * degrade to a marker with fewer fields, never to a compaction pi does not
+ * hear about.
+ */
+export interface ClaudeCompactBoundary {
+  type: "system";
+  subtype: "compact_boundary";
+  compact_metadata?: Record<string, unknown>;
+  compactMetadata?: Record<string, unknown>;
+}
+
+/**
  * Sub-agent lifecycle, emitted by the CLI as `system` envelopes.
  *
  * These arrive at TOP level — `parent_tool_use_id` is null — even for agents
