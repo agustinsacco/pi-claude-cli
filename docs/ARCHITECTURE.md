@@ -136,6 +136,15 @@ summing to 2.08M against a real 104k) pushed pi past its compaction threshold
 at a tenth of true occupancy — discarding history the window had ample room
 for. Guarded by `tests/multi-cycle.test.ts`.
 
+The latch has one more edge: a compaction. The CLI's summarization pass is an
+API call whose prompt is the entire pre-compaction conversation, and it is the
+last `message_start` the bridge sees before the CLI continues on the compacted
+context. Left alone, `lastCycleContext` reports that prompt — captured
+2026-09-16: 316,760 for a session the CLI had just cut to 37,239 — and pi
+compacts its own record on the phantom. So the `compact_boundary` envelope
+resets the latch to `postTokens` and appends a `[Claude Code · compact {…}]`
+marker (`handleCompactBoundary`, guarded by `tests/compaction.test.ts`).
+
 ### Billing reads `modelUsage`, not `usage` (0.4.10)
 
 `result.usage` is the **main agent only**. Claude Code sub-agents run inside

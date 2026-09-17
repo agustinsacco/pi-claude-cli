@@ -292,9 +292,27 @@ default instead of reaching the CLI, which rejects them by refusing to start.
 
 Note for pre-existing sessions: the first resumed turn of a session already
 past the window compacts immediately — one summarization pass, then the
-session continues small. That is the remediation, not a bug. pi's own
-compaction is separate (it rewrites pi's transcript, never the CLI session's)
-and with this cap it should rarely trigger.
+session continues small. That is the remediation, not a bug.
+
+**Compaction has one owner, and it is the CLI.** pi's own compaction rewrites
+pi's transcript and never the CLI session's, so on this provider it is pure
+loss: the model's context does not shrink and pi's record of the session does.
+It is also not rare. pi compacts when the reported context passes
+`contextWindow - reserveTokens` (about 183k on a 200k model), a line a Claude
+session crosses long before a roomy `--autocompact` cap — one captured session
+compacted pi's record nine times while the CLI compacted four. A host should
+switch pi's auto-compaction off for sessions on this provider
+(`set_auto_compaction` over RPC) and let `--autocompact` be the one budget.
+
+When the CLI does compact, the stream carries a `system` envelope with
+`subtype: "compact_boundary"`, and the provider (0.8.3+) does two things with
+it. It resets the reported context to the compacted size — until then the
+latch held the summarization pass's prompt, which is the whole pre-compaction
+conversation, and pi was told 360k for a session the CLI had just cut to 37k.
+And it appends a `[Claude Code · compact {"trigger":"auto","preTokens":…,
+"postTokens":…,"durationMs":…}]` marker, so a host can draw its compaction
+divider where the cut actually happened. The CLI continues the turn on the
+compacted context by itself; nothing is written to stdin to make that happen.
 
 ### Which system prompt
 

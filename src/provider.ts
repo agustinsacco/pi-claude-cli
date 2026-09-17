@@ -816,6 +816,16 @@ export function streamViaCli(
             }
           } else if (
             msg.type === "system" &&
+            (msg as any).subtype === "compact_boundary"
+          ) {
+            // The CLI compacted its own session and will carry on by itself.
+            // The host needs two things from it: the context is now the
+            // compacted size (the bridge resets its latch — otherwise pi is
+            // told the pre-compaction figure and compacts its own record on
+            // it), and the transcript should show where the cut happened.
+            if (!selfInterrupted) bridge.handleCompactBoundary(msg as any);
+          } else if (
+            msg.type === "system" &&
             isTaskSubtype((msg as any).subtype)
           ) {
             // Sub-agent lifecycle. The agents' own envelopes carry

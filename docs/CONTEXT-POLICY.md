@@ -7,15 +7,15 @@ process. Custom tools still execute in pi through the existing MCP handoff.
 
 ## One owner for each layer
 
-| Layer                                         | Owner under this policy                                                    |
-| --------------------------------------------- | -------------------------------------------------------------------------- |
-| Base operating prompt and native tool schemas | Claude Code, unchanged                                                     |
-| Project instructions and skill index          | pi, loaded once before calling the provider                                |
-| Artifact and other custom-tool guidance       | pi, preserved                                                              |
-| Generated core tool vocabulary                | Provider aligns pi names with native schemas                               |
-| Custom integrations                           | Only pi's explicit MCP bridge; no personal Claude MCP/claude.ai connectors |
-| Explicit host guards and managed policy       | Still honored; not disabled                                                |
-| Conversation state and compaction             | Still two ledgers; not unified by this feature                             |
+| Layer                                         | Owner under this policy                                                                                   |
+| --------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Base operating prompt and native tool schemas | Claude Code, unchanged                                                                                    |
+| Project instructions and skill index          | pi, loaded once before calling the provider                                                               |
+| Artifact and other custom-tool guidance       | pi, preserved                                                                                             |
+| Generated core tool vocabulary                | Provider aligns pi names with native schemas                                                              |
+| Custom integrations                           | Only pi's explicit MCP bridge; no personal Claude MCP/claude.ai connectors                                |
+| Explicit host guards and managed policy       | Still honored; not disabled                                                                               |
+| Conversation state and compaction             | Still two ledgers. The CLI owns compaction; a host should switch pi's off (README, "Auto-compact window") |
 
 ```mermaid
 flowchart TD
