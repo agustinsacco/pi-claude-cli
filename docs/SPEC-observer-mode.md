@@ -26,11 +26,11 @@ extension points (hooks, MCP), not process surgery.
    own `interrupt` control request — identical to a human pressing Esc.
 3. **Native tools run natively.** Read/Write/Edit/Bash/Grep/Glob and every
    CLI-side tool (WebSearch, Task, user MCP) execute inside the CLI.
-4. **Guards move to CLI hooks.** Path guards (pidex `worktree-paths`) are
+4. **Guards move to CLI hooks.** Path guards (Phosphor's `worktree-paths`) are
    PreToolUse hooks, passed via `--settings`. pi extensions no longer veto
    tool calls on this provider — that is the accepted trade.
 5. **pi custom tools survive via handoff.** Tools registered by pi extensions
-   (pidex orchestrator tools) are still advertised through the schema-only MCP
+   (host-registered tools) are still advertised through the schema-only MCP
    server. When the model calls one, the provider interrupts cleanly at
    `message_stop`, hands the toolCall to pi's loop (all pi hooks fire for
    these), and the next turn resumes with the result.
@@ -106,7 +106,7 @@ pi turn start ──► spawn `claude -p … --resume <cliId>` (stdin stream-jso
   CLI writes its native interruption records; resume stays coherent (verified).
 - **Timeouts, stderr surfacing, rate-limit passthrough:** unchanged.
 
-## Stream contract changes (what pi/pidex sees)
+## Stream contract changes (what pi and its front-ends see)
 
 - Built-in tools no longer arrive as pi `toolCall` blocks — they arrive as
   `[Claude Code · Name {args}]` markers, the same contract already used for
@@ -114,7 +114,7 @@ pi turn start ──► spawn `claude -p … --resume <cliId>` (stdin stream-jso
 - pi's transcript for a native turn is: markers + prose, one assistant message,
   no toolResult messages. Handoff turns look exactly like today's custom-tool
   turns.
-- Front-end note (pidex): live tool cards for built-ins become activity rows.
+- Front-end note (Phosphor): live tool cards for built-ins become activity rows.
   Tool _results_ are visible in the stream (`type:"user"` envelopes) and may be
   surfaced later; v1 does not forward them.
 
@@ -129,7 +129,7 @@ pi turn start ──► spawn `claude -p … --resume <cliId>` (stdin stream-jso
 
 Non-hermetic default is deliberate: "use the subscription the way the CLI
 uses it" includes the user's own MCP servers and skills. Hosts that need
-isolation (pidex fleets) set hermetic + their own settings file.
+isolation (hosts running many sessions at once) set hermetic + their own settings file.
 
 ## What is deleted
 

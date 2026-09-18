@@ -6,7 +6,7 @@
  * 1M-context models the CLI's own default lets a long-lived session ratchet
  * toward a million tokens, and this provider resumes ONE CLI session for a
  * pi session's whole life — nothing else ever shrinks it. Measured across
- * 26 real pidex sessions (2026-08-30): contexts ratcheted to 480k+, the
+ * 26 real Phosphor sessions (2026-08-30): contexts ratcheted to 480k+, the
  * average request carried 202k tokens, and cache reads alone were ~53% of
  * total spend. Sessions that stayed near 100–150k did the same work at a
  * fraction of the cost.

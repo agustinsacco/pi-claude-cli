@@ -13,7 +13,7 @@ import {
  *
  * 1. **Every payload parses.** Consumers `JSON.parse` these. The old builder
  *    cut `JSON.stringify(input)` at 120 characters, so most markers did not
- *    parse and pidex needed a fragment scanner with its own escape decoder.
+ *    parse and Phosphor needed a fragment scanner with its own escape decoder.
  * 2. **The identifying value survives.** A blind cut takes the END off, which
  *    for an absolute path is the filename — the only part a row shows.
  *

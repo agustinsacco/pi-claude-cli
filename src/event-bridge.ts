@@ -708,7 +708,7 @@ export function createEventBridge(
       // the one value worth reading. `src/tool-markers.ts` explains what
       // that cost and what it selects instead.
       //
-      // pidex matches /^\[Claude Code · ([^\s\]]+)(?:\s+([\s\S]*))?\]$/ to
+      // Phosphor matches /^\[Claude Code · ([^\s\]]+)(?:\s+([\s\S]*))?\]$/ to
       // render these as activity rows instead of prose; anything it cannot
       // match falls back to being shown as raw markdown, which is what this
       // marker existed to avoid. Change the shapes only together with the

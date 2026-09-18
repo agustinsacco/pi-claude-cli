@@ -676,12 +676,12 @@ describe("PI_CLAUDE_CLI_SETTINGS passthrough", () => {
   });
 
   it("passes --settings when the env var is set (hook injection point)", () => {
-    process.env.PI_CLAUDE_CLI_SETTINGS = "/etc/pidex/claude-settings.json";
+    process.env.PI_CLAUDE_CLI_SETTINGS = "/etc/phosphor/claude-settings.json";
     spawnClaude("claude-haiku-4-5");
     const args = (spawn as any).mock.calls[0][1] as string[];
     expect(args).toContain("--settings");
     expect(args[args.indexOf("--settings") + 1]).toBe(
-      "/etc/pidex/claude-settings.json",
+      "/etc/phosphor/claude-settings.json",
     );
   });
 
