@@ -187,7 +187,7 @@ The shift was not a private detail. Claude Code **skills size their own
 sub-agent fan-out from this flag** — `code-review` in 2.1.231 carries three
 tiers (`angleCount:8, cap:8`, `angleCount:8, cap:10`, `angleCount:10,
 cap:15`) — so a host asking for `high` on opus silently bought the widest one.
-A pidex turn on 2026-08-27 did exactly that: 14 nested agents, 743 API calls
+A Phosphor turn on 2026-08-27 did exactly that: 14 nested agents, 743 API calls
 and 43.4M cache-read tokens in eight minutes, from a UI whose chip read
 "High".
 
@@ -218,7 +218,7 @@ of a parallel-array invariant with `output.content`: a dropped block must not
 shift the indexes of the blocks after it.
 
 Sessions recorded before 0.4.4 still hold empty thinking blocks on disk
-forever, so front-ends need their own guard regardless — pidex skips them on
+forever, so front-ends need their own guard regardless — Phosphor skips them on
 settled items.
 
 ## Tools: the three-way split
@@ -291,7 +291,7 @@ Front-ends parse the marker string, so its shape is API:
 [Claude Code · <ToolName> <argsJson>]   # complete, parseable JSON
 ```
 
-pidex renders matches as activity rows and anything else as markdown prose,
+Phosphor renders matches as activity rows and anything else as markdown prose,
 so a format change that looks cosmetic here degrades rendering there.
 
 `argsJson` is **complete JSON** as of 0.8.0, and `src/tool-markers.ts`
@@ -341,7 +341,7 @@ dropped:
 
 A fan-out used to be a blank pane. The `Task` launch surfaced as an ordinary
 marker and then nothing followed, because every envelope the sub-agents
-produced carried `parent_tool_use_id` and was dropped. One pidex turn sat
+produced carried `parent_tool_use_id` and was dropped. One Phosphor turn sat
 silent for eight minutes behind 14 nested agents and was killed as hung
 (issue #23); a second-order effect made it worse, since `resetInactivityTimer`
 runs before the filter, so an invisible fan-out also never trips the 300s
@@ -486,7 +486,7 @@ A CLI process used to live exactly one pi call. That was the multiplier
 behind every avoidable cache miss: Claude Code rebuilds its system prompt at
 process start, and the prompt embeds a **git snapshot** (status, recent
 commits, branch). Any change to it between two processes — the model
-committing, pidex renaming the branch after naming, an untracked file —
+committing, Phosphor renaming the branch after naming, an untracked file —
 invalidated everything after the tools block, so the next process re-billed
 the whole context as cache write. Measured 2026-09-01 in one session: 64k,
 106k and 190k tokens on three restarts inside the 1h cache TTL; 1.87M tokens

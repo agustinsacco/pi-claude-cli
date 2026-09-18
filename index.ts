@@ -44,7 +44,7 @@ const PROVIDER_ID = "pi-claude-cli";
 
 /**
  * Status key carrying account rate-limit state to the front-end. Neutral
- * (not pidex-specific) because any pi front-end can read it.
+ * (not host-specific) because any pi front-end can read it.
  */
 const RATE_LIMIT_STATUS_KEY = "claude-rate-limit";
 

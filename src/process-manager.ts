@@ -190,7 +190,7 @@ export function spawnClaude(
   }
 
   // Host-supplied Claude Code settings (hooks, permissions). This is how a
-  // host injects PreToolUse guards — e.g. pidex's worktree-paths guard —
+  // host injects PreToolUse guards — e.g. Phosphor's worktree-paths guard —
   // without pi intercepting the CLI's native tool execution.
   const settingsPath = process.env.PI_CLAUDE_CLI_SETTINGS;
   if (settingsPath) {

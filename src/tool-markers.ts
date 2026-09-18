@@ -15,7 +15,7 @@
  * cosmetic:
  *
  * - The cut lands wherever it lands, so `JSON.parse` fails on most markers
- *   and every consumer needs a fragment scanner to recover pairs (pidex grew
+ *   and every consumer needs a fragment scanner to recover pairs (Phosphor grew
  *   ~90 lines of one, including a hand-written escape decoder, because a cut
  *   right after a backslash left an orphaned escape).
  * - It cuts the END off values, which for a file path is the ONLY part worth

@@ -6,7 +6,7 @@
  * internal loop, and forwarding hundreds of nested tool calls would bury the
  * turn. But dropping them left a host with nothing at all: a single
  * `[Claude Code · Task {…}]` marker and then silence for as long as the
- * fan-out ran. One pidex turn sat blank for eight minutes behind 14 nested
+ * fan-out ran. One Phosphor turn sat blank for eight minutes behind 14 nested
  * agents and was killed as hung (issue #23).
  *
  * The CLI already publishes a purpose-built feed for exactly this, and the
@@ -32,7 +32,7 @@
  * here. The list is flat, and honestly so.
  *
  * TWO THINGS THIS CHANNEL IS NOT. Both were shipped as sub-agents once, and
- * both put rows in pidex that named work no agent ever did:
+ * both put rows in Phosphor that named work no agent ever did:
  *
  * - **Not every task is an agent.** `task_started` carries `task_type`, and
  *   the CLI auto-backgrounds a slow `Bash` into a `local_bash` task with the

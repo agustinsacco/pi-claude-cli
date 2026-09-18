@@ -329,7 +329,7 @@ describe.skipIf(!LIVE)("live guard hook + steer", () => {
     writeFileSync(outside, "the word is FORBIDDEN\n");
 
     // PreToolUse hook: block file tools whose path leaves the workspace —
-    // the ported pidex worktree-paths guard.
+    // the ported Phosphor worktree-paths guard.
     const guard = join(ws, "guard.cjs");
     writeFileSync(
       guard,

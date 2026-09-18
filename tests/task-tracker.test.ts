@@ -308,7 +308,7 @@ describe("createTaskTracker", () => {
 /**
  * The task feed is not a sub-agent feed. `task_started` carries `task_type`,
  * and the CLI auto-backgrounds a slow `Bash` into a `local_bash` task wearing
- * the tool's own description — which reached a real pidex transcript as a
+ * the tool's own description — which reached a real Phosphor transcript as a
  * fourth "agent" in a three-agent fan-out (captured 2026-08-28, claude
  * 2.1.231).
  */
