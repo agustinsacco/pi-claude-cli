@@ -136,6 +136,7 @@ Thinking blocks are materialized **lazily**, on the first `thinking_delta` carry
 - Inactivity timeout is **300s** of no stdout (`PI_CLAUDE_CLI_TIMEOUT_MS` overrides). It is deliberately generous: CLI-side tools are legitimately silent for minutes. Abort uses SIGKILL; a `streamEnded`/`broken` guard pair prevents double `end()`/error races.
 - **Context overflow** is rewritten by `src/overflow.ts` to the `context_length_exceeded:` prefix pi's auto-compaction recognizes. The matcher is deliberately narrow and must never catch rate-limit errors, which belong on pi's retry/backoff path.
 - `PI_CLAUDE_CLI_HERMETIC=1` adds `--strict-mcp-config --setting-sources ""` so the user's own MCP servers, hooks and CLAUDE.md stay out of pi turns.
+- `PI_CLAUDE_CLI_EPHEMERAL=1` (one-shots such as `pi -p --no-session`) adds `--no-session-persistence` and makes `setCliSession` / `setSystemPrompt` no-ops: nothing is written that only a later `--resume` would read. Flag parsing for it lives in `src/env-flag.ts` so `session-map.ts` need not import the process manager.
 - **Account rate-limit state travels outside the stream** — `onRateLimit` → `ctx.ui.setStatus("claude-rate-limit", json)`. It must never be folded into turn content, which would put account state in the user's transcript and pi's session file.
 
 ## Conventions

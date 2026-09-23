@@ -208,6 +208,7 @@ sessions. All are optional.
 | `PI_CLAUDE_CLI_AGENT_WAIT_MS`   | `900000`                    | Hard ceiling on holding a turn open for background sub-agents.                              |
 | `PI_CLAUDE_CLI_NO_AGENT_WAIT`   | off                         | `1` ends the turn at `result` even with sub-agents still running.                           |
 | `PI_CLAUDE_CLI_STATE_DIR`       | `~/.pi/agent/pi-claude-cli` | Where the session sidecar map and stored system prompts live.                               |
+| `PI_CLAUDE_CLI_EPHEMERAL`       | off                         | `1` for one-shots (`pi -p --no-session`): no CLI transcript, nothing added to the sidecar.  |
 | `MCP_TOOL_TIMEOUT`              | `3600000`                   | Passed to the CLI when unset — a proxied call blocks until pi has run the tool.             |
 
 The sections below explain the ones with real consequences.
@@ -264,6 +265,26 @@ strict MCP, so setting both is safe.
 Why a host wants it: MCP servers the host did not configure are invisible to
 it, bypass its tool guards, and are never counted by pi-side status or context
 accounting.
+
+### Ephemeral one-shots
+
+Every turn normally leaves three things behind so the next one can resume: the
+CLI's transcript under `~/.claude/projects/<cwd>/<id>.jsonl`, the pi → CLI
+pairing in `session-map.json`, and the stored system prompt under
+`sysprompt/<id>.txt`. For a `pi -p --no-session` call — session auto-naming, a
+health check — there is no next turn, so all three are debris: one install had
+238 orphaned transcripts (~60 KB each), and 727 of 794 map entries and 863 of
+910 stored prompts were never read again.
+
+Set `PI_CLAUDE_CLI_EPHEMERAL=1` on those calls only. The CLI is spawned with
+`--no-session-persistence` and the sidecar records nothing. A follow-up turn
+inside the same pi process still reuses the parked process; one that has to
+respawn (keepalive expired, a custom-tool handoff with
+`PI_CLAUDE_CLI_HANDOFF_PROXY=0`) reimports the full history instead of
+resuming. Do not switch it on part-way through a persisted session: the CLI
+would not record those turns, and a later resume would silently miss them.
+`--no-session-persistence` is not new: this provider passed it on every spawn
+until `--resume` support landed in 0.1.x, and it was verified again on 2.1.280.
 
 ## Tool markers
 
