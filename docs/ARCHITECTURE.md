@@ -562,6 +562,11 @@ overrides; `src/session-map.ts`) links pi session id → CLI session id, and
 `sysprompt/<cliId>.txt` beside it holds the system prompt that session was
 created with.
 
+`PI_CLAUDE_CLI_EPHEMERAL=1` opts a one-shot out of all of it: the CLI runs with
+`--no-session-persistence` and neither the pairing nor the prompt is recorded,
+so every respawn in that pi session is a create/import and none is a resume.
+Reuse of a parked process is unaffected — it needs no pairing.
+
 - **Resume:** mapping present and not stale → `--resume <cliId>` with a
   **delta** prompt (only what follows the last assistant turn), plus the
   stored system prompt replayed verbatim via `--system-prompt-file` /

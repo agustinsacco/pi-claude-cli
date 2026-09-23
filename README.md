@@ -36,7 +36,7 @@ See [the context contract](docs/CONTEXT-POLICY.md).
 - Use pi's normal tool and transcript UI. Historical `[Claude Code · ...]` markers remain readable for old sessions.
 - Explicit host hooks supplied with `PI_CLAUDE_CLI_SETTINGS` and managed Claude policy remain in force. Do not use `--bare`: it disables subscription authentication and hooks.
 - The `claude-rate-limit` status reports subscription state outside conversation content.
-- One-shot hosts should set `PI_CLAUDE_CLI_KEEPALIVE_MS=0` so a parked process does not delay exit.
+- One-shot hosts should set `PI_CLAUDE_CLI_KEEPALIVE_MS=0` so a parked process does not delay exit, and `PI_CLAUDE_CLI_EPHEMERAL=1` so a run on the legacy path leaves nothing behind either.
 
 ## Configuration
 
@@ -51,6 +51,8 @@ The defaults above require no environment variables.
 | `MCP_TOOL_TIMEOUT`              | `3600000` | CLI MCP call timeout                                 |
 
 `PI_CLAUDE_CLI_CONTEXT=pi` explicitly selects the default. `legacy` retains the old observer behavior for compatibility, with native Claude tools, a separate persistent transcript and CLI-owned compaction. `PI_CLAUDE_CLI_SYSTEM_PROMPT`, `PI_CLAUDE_CLI_AUTOCOMPACT`, `PI_CLAUDE_CLI_TOOL_RESULTS`, `PI_CLAUDE_CLI_HERMETIC` and `PI_CLAUDE_CLI_STRICT_MCP` configure that legacy path; they do not weaken pi ownership in the default path. [Legacy architecture and wire contracts](docs/ARCHITECTURE.md).
+
+`PI_CLAUDE_CLI_EPHEMERAL=1` is for one-shots such as `pi -p --no-session` (session naming, health checks). On the legacy path it spawns the CLI with `--no-session-persistence` and records no resume pairing or stored system prompt, as the default already does. Do not switch it on part-way through a persisted legacy session: the CLI would not record those turns, and a later resume would silently miss them.
 
 ## Development
 

@@ -13,6 +13,7 @@
 import { readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { isEphemeral } from "./env-flag.js";
 
 function stateDir(): string {
   return (
@@ -51,7 +52,16 @@ export function getCliSession(piSessionId: string): string | undefined {
   return readMap()[piSessionId];
 }
 
+/**
+ * Record which CLI session backs a pi session.
+ *
+ * A no-op under PI_CLAUDE_CLI_EPHEMERAL (src/env-flag.ts): there is no next
+ * turn to resume, and the CLI was told not to keep its transcript, so a
+ * recorded pairing could only ever point at a session that does not exist.
+ * Clearing stays live — it only ever removes state.
+ */
 export function setCliSession(piSessionId: string, cliSessionId: string): void {
+  if (isEphemeral()) return;
   const map = readMap();
   map[piSessionId] = cliSessionId;
   writeMap(map);
@@ -106,7 +116,14 @@ export function getSystemPrompt(cliSessionId: string): string | undefined {
   }
 }
 
+/**
+ * Store the prompt a CLI session was created with, for verbatim replay.
+ *
+ * A no-op under PI_CLAUDE_CLI_EPHEMERAL: only a resume reads it back, and an
+ * ephemeral session is never resumed (see setCliSession).
+ */
 export function setSystemPrompt(cliSessionId: string, prompt: string): void {
+  if (isEphemeral()) return;
   try {
     mkdirSync(join(stateDir(), "sysprompt"), { recursive: true });
     writeFileSync(systemPromptPath(cliSessionId), prompt, "utf-8");

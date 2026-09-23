@@ -56,6 +56,23 @@ describe("default pi-owned launch", () => {
     expect(process.env.CLAUDE_CODE_DISABLE_CLAUDE_MDS).toBe("0");
   });
 
+  it("passes --no-session-persistence once, with or without PI_CLAUDE_CLI_EPHEMERAL", () => {
+    // A host's one-shots (session naming) set the ephemeral flag on top of
+    // the default; the two reasons for the flag must not stack it.
+    delete process.env.PI_CLAUDE_CLI_CONTEXT;
+    for (const ephemeral of ["", "1"]) {
+      vi.stubEnv("PI_CLAUDE_CLI_EPHEMERAL", ephemeral);
+      spawnClaude("claude-haiku-4-5", "PI-CONTEXT", { newSessionId: "once" });
+      const argv = vi.mocked(spawn).mock.calls.at(-1)![1] as string[];
+      expect(
+        argv.filter((arg) => arg === "--no-session-persistence"),
+        `PI_CLAUDE_CLI_EPHEMERAL=${ephemeral}`,
+      ).toHaveLength(1);
+      expect(argv[argv.indexOf("--session-id") + 1]).toBe("once");
+    }
+    cleanupSystemPromptFile("once");
+  });
+
   it("never resumes an old CLI transcript or falls back to its prompt", () => {
     delete process.env.PI_CLAUDE_CLI_CONTEXT;
     spawnClaude("claude-haiku-4-5", undefined, { resumeSessionId: "existing" });

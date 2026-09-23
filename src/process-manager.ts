@@ -21,6 +21,7 @@ import {
   ContextPolicyError,
   assertContextCliVersion,
 } from "./context-policy.js";
+import { envFlag, isEphemeral } from "./env-flag.js";
 
 /**
  * Spawn a Claude CLI subprocess with all required flags for stream-json communication.
@@ -33,12 +34,6 @@ import {
  * @param options - Optional cwd, AbortSignal, effort level and prompt mode
  * @returns The spawned ChildProcess with piped stdin/stdout/stderr
  */
-/** Truthy env opt-in: "1", "true" or "yes", case-insensitive. */
-function envFlag(name: string): boolean {
-  const value = (process.env[name] ?? "").toLowerCase();
-  return value === "1" || value === "true" || value === "yes";
-}
-
 /** Truthy PI_CLAUDE_CLI_HERMETIC opts in to hermetic mode (see README). */
 function isHermetic(): boolean {
   return envFlag("PI_CLAUDE_CLI_HERMETIC");
@@ -141,13 +136,7 @@ export function spawnClaude(
     args.push("--setting-sources", "");
   }
   if (piContext) {
-    args.push(
-      "--disable-slash-commands",
-      "--no-chrome",
-      "--tools",
-      "",
-      "--no-session-persistence",
-    );
+    args.push("--disable-slash-commands", "--no-chrome", "--tools", "");
   }
 
   if (!piContext && options?.resumeSessionId) {
@@ -156,6 +145,21 @@ export function spawnClaude(
   } else if (options?.newSessionId) {
     // First turn: create session with this ID so subsequent turns can --resume it
     args.push("--session-id", options.newSessionId);
+  }
+
+  // Nothing the CLI would write here is ever read back, for one of two
+  // reasons. Under pi context the process is a disposable cache of pi's
+  // history and is never resumed. PI_CLAUDE_CLI_EPHEMERAL (src/env-flag.ts)
+  // marks a legacy one-shot with no next turn, so its transcript under
+  // ~/.claude/projects would be pure disk debris (~60 KB per call).
+  // --session-id stays: the id still keys this spawn's staged prompt and MCP
+  // config, and the CLI honours it without writing anything. Verified on
+  // claude 2.1.280 with exactly this flag set (stream-json + --session-id): no
+  // transcript written, the result envelope carried the requested session_id.
+  // A legacy pi session that only ever runs ephemeral never reaches --resume
+  // either: session-map.ts records no pairing for it to resume from.
+  if (piContext || isEphemeral()) {
+    args.push("--no-session-persistence");
   }
 
   if (systemPrompt || piContext) {

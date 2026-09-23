@@ -28,6 +28,7 @@ CI runs lint, formatting, typecheck, coverage and deterministic e2e on Linux, ma
 - `src/handoff-broker.ts`, `mcp-schema-server.cjs`: schema-only MCP bridge. Execution always occurs in pi. Private per-process runtime directory, authenticated local requests, match the actual tool-use id and name.
 - `src/event-bridge.ts`: convert events to pi messages. Content indexes restart each model cycle, so track `(cycle,index)`. Empty encrypted thinking must not create visible blocks.
 - `src/session-map.ts`, native tool mappings, legacy prompt conversion: retained for explicit legacy compatibility. The default never creates pairings or stored prompts and detaches old pairings on use.
+- `src/env-flag.ts`: boolean env opt-ins, kept apart so `session-map.ts` need not import the process manager. `PI_CLAUDE_CLI_EPHEMERAL=1` (one-shots such as `pi -p --no-session`) makes `setCliSession` / `setSystemPrompt` no-ops and adds `--no-session-persistence`, which the default passes anyway, so a legacy one-shot writes nothing only a later `--resume` would read.
 
 ## Invariants
 

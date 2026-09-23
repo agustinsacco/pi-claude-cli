@@ -1,5 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+  readFileSync,
+  readdirSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -77,6 +83,43 @@ describe("session-map sidecar", () => {
       "utf-8",
     );
     expect(JSON.parse(raw)["pi-1"]).toBe("cli-1");
+  });
+
+  describe("ephemeral mode (PI_CLAUDE_CLI_EPHEMERAL)", () => {
+    afterEach(() => {
+      delete process.env.PI_CLAUDE_CLI_EPHEMERAL;
+    });
+
+    it("records no pairing and no prompt, and writes nothing to disk", () => {
+      // A one-shot has no next turn: anything written here is never read.
+      process.env.PI_CLAUDE_CLI_EPHEMERAL = "1";
+      setCliSession("pi-eph", "cli-eph");
+      setSystemPrompt("cli-eph", "PROMPT");
+      expect(getCliSession("pi-eph")).toBeUndefined();
+      expect(getSystemPrompt("cli-eph")).toBeUndefined();
+      expect(readdirSync(dir)).toEqual([]);
+    });
+
+    it("leaves earlier state readable and clearable", () => {
+      setCliSession("pi-1", "cli-1");
+      setSystemPrompt("cli-1", "ONE");
+      process.env.PI_CLAUDE_CLI_EPHEMERAL = "true";
+      setCliSession("pi-1", "cli-other");
+      expect(getCliSession("pi-1")).toBe("cli-1");
+      expect(getSystemPrompt("cli-1")).toBe("ONE");
+      clearCliSession("pi-1");
+      clearSystemPrompt("cli-1");
+      expect(getCliSession("pi-1")).toBeUndefined();
+      expect(getSystemPrompt("cli-1")).toBeUndefined();
+    });
+
+    it("records as usual when set to a falsy value", () => {
+      process.env.PI_CLAUDE_CLI_EPHEMERAL = "0";
+      setCliSession("pi-1", "cli-1");
+      setSystemPrompt("cli-1", "ONE");
+      expect(getCliSession("pi-1")).toBe("cli-1");
+      expect(getSystemPrompt("cli-1")).toBe("ONE");
+    });
   });
 
   describe("stored system prompt", () => {
