@@ -7,6 +7,11 @@ import {
   usesPiContext,
 } from "../src/context-policy";
 import { buildSystemPrompt } from "../src/prompt-builder";
+import {
+  piSystemPrompt,
+  replayPiMessages,
+  historyHash,
+} from "../src/pi-context";
 
 const suffix = `Pi documentation (read only when asked):
 - Main documentation: /home/user/.pi/docs
@@ -45,7 +50,48 @@ ${suffix}`;
 
 afterEach(() => vi.unstubAllEnvs());
 
-describe("pi context with native execution", () => {
+describe("pi context", () => {
+  it("replays all history in order, including old images and all tool results", () => {
+    const messages = [
+      {
+        role: "user",
+        content: [{ type: "image", data: "old-image", mimeType: "image/png" }],
+      },
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "private" },
+          { type: "toolCall", id: "a", name: "edit", arguments: { edits: [] } },
+        ],
+      },
+      {
+        role: "toolResult",
+        toolCallId: "a",
+        toolName: "edit",
+        isError: true,
+        content: "denied",
+      },
+      { role: "user", content: "next" },
+      {
+        role: "toolResult",
+        toolCallId: "b",
+        toolName: "custom",
+        content: "result",
+      },
+    ];
+    const result = replayPiMessages(messages);
+    expect(result[1].source.data).toBe("old-image");
+    const text = JSON.stringify(result);
+    expect(text).toContain("edits");
+    expect(text).toContain("denied");
+    expect(text.indexOf("denied")).toBeLessThan(text.indexOf("next"));
+    expect(text).toContain("result");
+    expect(text).not.toContain("private");
+    expect(historyHash(messages)).toBe(
+      historyHash(messages.map((m) => ({ ...m, timestamp: 1, usage: {} }))),
+    );
+    expect(historyHash(messages)).not.toBe(historyHash(messages.slice(1)));
+  });
   it("requires a CLI that supports the tested isolation controls", () => {
     for (const version of ["2.1.263 (Claude Code)", "2.2.0", "3.0.0"])
       expect(() => assertContextCliVersion(version)).not.toThrow();
@@ -60,8 +106,8 @@ describe("pi context with native execution", () => {
         "Update Claude Code",
       );
   });
-  it("is opt-in and rejects misspelled policies", () => {
-    expect(usesPiContext({})).toBe(false);
+  it("defaults to pi ownership and rejects misspelled policies", () => {
+    expect(usesPiContext({})).toBe(true);
     expect(usesPiContext({ PI_CLAUDE_CLI_CONTEXT: "legacy" })).toBe(false);
     expect(usesPiContext({ PI_CLAUDE_CLI_CONTEXT: " PI " })).toBe(true);
     expect(() => usesPiContext({ PI_CLAUDE_CLI_CONTEXT: "typo" })).toThrow(
@@ -122,15 +168,17 @@ describe("pi context with native execution", () => {
       { systemPrompt: prompt, messages: [{ role: "toolResult" }] },
       process.cwd(),
     );
-    expect(first).toBe(alignPiContext(prompt));
+    expect(first).toBe(piSystemPrompt(prompt));
     expect(next).toBe(first);
-    expect(() =>
+    expect(
       buildSystemPrompt(
         { systemPrompt: prompt, messages: [] },
         process.cwd(),
         "pi",
       ),
-    ).toThrow("default claude");
+    ).toBe(first);
+    expect(first.startsWith(prompt)).toBe(true);
+    expect(first).toContain("edits[].oldText");
   });
 
   it("requires fresh sessions across policy boundaries, but permits same-policy resumes", () => {

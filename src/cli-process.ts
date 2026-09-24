@@ -24,6 +24,7 @@
 import type { ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 import { parseLine } from "./stream-parser.js";
+import { removeSessionMcpConfig } from "./mcp-config.js";
 import { handleControlRequest } from "./control-handler.js";
 import {
   writeUserMessage,
@@ -126,6 +127,8 @@ export class CliProcess implements HandoffTarget {
   /** True when proxied handoffs are on for this process. */
   readonly allowHandoff: boolean;
   readonly getStderr: () => string;
+  /** Pi history acknowledged by this disposable process, never a second ledger. */
+  piHistory?: { length: number; hash: string };
 
   /** A user message has been written and no `result` has followed yet. */
   turnActive = false;
@@ -359,6 +362,7 @@ export class CliProcess implements HandoffTarget {
   retire(): Promise<void> {
     if (this.retired) return this.waitClosed();
     this.retired = true;
+    removeSessionMcpConfig(this.cliSessionId);
     this.clearIdleTimer();
     unregisterHandoffTarget(this.cliSessionId, this);
     this.failPendingCalls("pi abandoned this tool call.");
@@ -446,6 +450,7 @@ export class CliProcess implements HandoffTarget {
   private handleProcClose(code: number | null): void {
     if (this.closed) return;
     this.closed = true;
+    removeSessionMcpConfig(this.cliSessionId);
     this.alive = false;
     this.turnActive = false;
     this.clearIdleTimer();

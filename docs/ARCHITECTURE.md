@@ -1,6 +1,13 @@
-# Architecture
+# Legacy observer architecture
 
-How this extension turns the Claude Code CLI into a pi model provider, what
+This document describes the explicit `PI_CLAUDE_CLI_CONTEXT=legacy` compatibility
+path and the marker contracts needed to render old sessions. The default from
+0.9.0 uses [pi-owned context and execution](CONTEXT-POLICY.md): all tools run in
+pi, CLI sessions are disposable and pi owns compaction. The lifecycle/bridge
+code is shared, but the native execution, saved pairing and CLI compaction
+sections below do not describe the default.
+
+How the legacy path turns the Claude Code CLI into a pi model provider, what
 crosses the boundary in each direction, and why each non-obvious decision is
 the way it is.
 
@@ -13,8 +20,7 @@ agent: it owns native tools, its default prompt, and a separate transcript
 and compaction lifecycle. pi executes custom handoff tools and remains the
 front-end's system of record.
 
-The opt-in [pi context policy](CONTEXT-POLICY.md) (0.7.1+) consolidates project,
-skill and integration discovery without replacing that native execution model.
+The [default context policy](CONTEXT-POLICY.md) replaces this execution model.
 
 Registration happens twice in `index.ts`, because pi 0.84 has two dispatch
 paths:

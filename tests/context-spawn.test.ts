@@ -6,6 +6,7 @@ vi.mock("node:child_process", () => ({
 }));
 import spawn from "cross-spawn";
 import { spawnClaude, cleanupSystemPromptFile } from "../src/process-manager";
+import { handleControlRequest } from "../src/control-handler";
 
 afterEach(() => {
   cleanupSystemPromptFile();
@@ -13,13 +14,12 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe("pi context launch profile", () => {
-  it("isolates discovery while retaining native tools, the default prompt, host guards and auth environment", () => {
-    vi.stubEnv("PI_CLAUDE_CLI_CONTEXT", "pi");
+describe("default pi-owned launch", () => {
+  it("replaces the prompt, disables native tools and persistence, preserves explicit guards and auth", () => {
+    delete process.env.PI_CLAUDE_CLI_CONTEXT;
     vi.stubEnv("PI_CLAUDE_CLI_SETTINGS", "/host/guards.json");
     vi.stubEnv("CLAUDE_SECURESTORAGE_CONFIG_DIR", "/account/selected");
     vi.stubEnv("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "0");
-    vi.stubEnv("ENABLE_CLAUDEAI_MCP_SERVERS", "true");
     spawnClaude("claude-haiku-4-5", "PI-CONTEXT", {
       mcpConfigPath: "/pi/bridge.json",
     });
@@ -29,52 +29,55 @@ describe("pi context launch profile", () => {
     expect(argv[argv.indexOf("--setting-sources") + 1]).toBe("");
     expect(argv).toContain("--disable-slash-commands");
     expect(argv).toContain("--no-chrome");
+    expect(argv).toContain("--no-session-persistence");
+    expect(argv[argv.indexOf("--tools") + 1]).toBe("");
     expect(argv[argv.indexOf("--mcp-config") + 1]).toBe("/pi/bridge.json");
     expect(argv[argv.indexOf("--settings") + 1]).toBe("/host/guards.json");
     expect(
-      readFileSync(
-        argv[argv.indexOf("--append-system-prompt-file") + 1],
-        "utf8",
-      ),
+      readFileSync(argv[argv.indexOf("--system-prompt-file") + 1], "utf8"),
     ).toBe("PI-CONTEXT");
     for (const forbidden of [
       "--bare",
       "--safe-mode",
-      "--tools",
-      "--system-prompt-file",
+      "--append-system-prompt-file",
+      "--autocompact",
       "--dangerously-skip-permissions",
-    ]) {
+    ])
       expect(argv).not.toContain(forbidden);
-    }
-    expect(argv[argv.indexOf("--disallowedTools") + 1]).toBe("AskUserQuestion");
     expect(options?.env).toMatchObject({
       CLAUDE_SECURESTORAGE_CONFIG_DIR: "/account/selected",
       CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1",
       CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
       ENABLE_CLAUDEAI_MCP_SERVERS: "false",
+      DISABLE_AUTO_COMPACT: "1",
+      DISABLE_COMPACT: "1",
+      ENABLE_TOOL_SEARCH: "false",
     });
-    expect(options?.env).not.toHaveProperty("CLAUDE_CODE_SIMPLE");
     expect(process.env.CLAUDE_CODE_DISABLE_CLAUDE_MDS).toBe("0");
   });
 
-  it("applies the same policy on resume", () => {
-    vi.stubEnv("PI_CLAUDE_CLI_CONTEXT", "pi");
+  it("never resumes an old CLI transcript or falls back to its prompt", () => {
+    delete process.env.PI_CLAUDE_CLI_CONTEXT;
     spawnClaude("claude-haiku-4-5", undefined, { resumeSessionId: "existing" });
-    expect(vi.mocked(spawn).mock.calls[0][1]).toEqual(
-      expect.arrayContaining([
-        "--resume",
-        "existing",
-        "--disable-slash-commands",
-        "--strict-mcp-config",
-      ]),
-    );
+    const argv = vi.mocked(spawn).mock.calls[0][1] as string[];
+    expect(argv).not.toContain("--resume");
+    expect(argv).toContain("--system-prompt-file");
+    cleanupSystemPromptFile("existing");
   });
 
-  it("refuses conflicting prompt replacement before spawning", () => {
-    vi.stubEnv("PI_CLAUDE_CLI_CONTEXT", "pi");
-    expect(() =>
-      spawnClaude("claude-haiku-4-5", "prompt", { systemPromptMode: "pi" }),
-    ).toThrow("default system prompt");
-    expect(spawn).not.toHaveBeenCalled();
+  it("refuses non-pi execution even if a native permission request arrives", () => {
+    delete process.env.PI_CLAUDE_CLI_CONTEXT;
+    const stdin = { write: vi.fn() };
+    const request = {
+      request_id: "x",
+      request: { tool_name: "Bash", input: {} },
+    } as any;
+    expect(
+      handleControlRequest(request, stdin as any, { allowHandoff: true }),
+    ).toBe(false);
+    request.request.tool_name = "mcp__custom-tools__bash";
+    expect(
+      handleControlRequest(request, stdin as any, { allowHandoff: true }),
+    ).toBe(true);
   });
 });

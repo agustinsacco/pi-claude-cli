@@ -3,7 +3,6 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   mkdtempSync,
   mkdirSync,
-  readFileSync,
   writeFileSync,
   rmSync,
   existsSync,
@@ -17,9 +16,10 @@ import { streamViaCli } from "../src/provider";
 import { startHandoffBroker, stopHandoffBroker } from "../src/handoff-broker";
 import { writeSchemaFile, cleanupMcpConfigFiles } from "../src/mcp-config";
 import { takeParkedCliProcess } from "../src/cli-process";
-import { getCliSession, getSystemPrompt } from "../src/session-map";
+import { getCliSession } from "../src/session-map";
+import { createReadTool } from "@earendil-works/pi-coding-agent";
 
-const LIVE = process.env.PI_CLAUDE_CLI_CONTEXT_LIVE === "1";
+const LIVE = process.env.PI_OWNED_LIVE === "1";
 const model = {
   id: "claude-haiku-4-5",
   name: "Claude Haiku 4.5",
@@ -32,7 +32,7 @@ const model = {
   maxTokens: 8192,
 } as any;
 
-describe.skipIf(!LIVE)("live pi-context / native-tools policy", () => {
+describe.skipIf(!LIVE)("live pi-owned default", () => {
   let ws: string;
   let schema: ReturnType<typeof writeSchemaFile>;
   let socket: string;
@@ -41,7 +41,8 @@ describe.skipIf(!LIVE)("live pi-context / native-tools policy", () => {
   const sessionId = `context-proof-${Date.now()}`;
   const messages: any[] = [];
   let prompt: string;
-  let transcript: string | undefined;
+  let nativeRead: ReturnType<typeof createReadTool>;
+  const cliIds: string[] = [];
 
   beforeAll(async () => {
     ws = realpathSync.native(mkdtempSync(join(tmpdir(), "pcc-context-")));
@@ -117,7 +118,7 @@ describe.skipIf(!LIVE)("live pi-context / native-tools policy", () => {
         hooks: {
           PreToolUse: [
             {
-              matcher: "Read",
+              matcher: "mcp__custom-tools__read",
               hooks: [{ type: "command", command: `node "${hook}"` }],
             },
           ],
@@ -125,7 +126,13 @@ describe.skipIf(!LIVE)("live pi-context / native-tools policy", () => {
       }),
     );
     vi.stubEnv("PI_CLAUDE_CLI_SETTINGS", settings);
+    nativeRead = createReadTool(ws);
     schema = writeSchemaFile([
+      {
+        name: "read",
+        description: nativeRead.description,
+        inputSchema: nativeRead.parameters as any,
+      },
       {
         name: "context_probe",
         description:
@@ -148,7 +155,10 @@ describe.skipIf(!LIVE)("live pi-context / native-tools policy", () => {
           buffer = buffer.slice(nl + 1);
           try {
             const msg = JSON.parse(line);
-            if (msg.type === "system" && msg.subtype === "init") init = msg;
+            if (msg.type === "system" && msg.subtype === "init") {
+              init = msg;
+              cliIds.push(msg.session_id);
+            }
           } catch {
             /* framing-only capture */
           }
@@ -172,12 +182,16 @@ describe.skipIf(!LIVE)("live pi-context / native-tools policy", () => {
       const calls = reply.content.filter((b) => b.type === "toolCall");
       if (!calls.length) return reply;
       for (const call of calls) {
-        expect(call.name).toBe("context_probe");
+        expect(["read", "context_probe"]).toContain(call.name);
+        const content =
+          call.name === "read"
+            ? (await nativeRead.execute(call.id, call.arguments as any)).content
+            : [{ type: "text", text: "PI_TOOL" }];
         messages.push({
           role: "toolResult",
           toolCallId: call.id,
           toolName: call.name,
-          content: [{ type: "text", text: "PI_TOOL" }],
+          content,
           isError: false,
           timestamp: Date.now(),
         });
@@ -187,11 +201,12 @@ describe.skipIf(!LIVE)("live pi-context / native-tools policy", () => {
   }
 
   it(
-    "loads pi context once, excludes foreign discovery, preserves guards and handoffs, and stays warm",
+    "uses only pi tools, stays warm, reimports a native turn, and persists no CLI session",
     { timeout: 180000 },
     async () => {
+      delete process.env.PI_CLAUDE_CLI_CONTEXT;
       const first = await turn(
-        "Use native Read to read payload.txt and the listed pi-probe skill file. Call context_probe once. Reply with the project word, file word, skill word and tool word. No other files or shell commands.",
+        "Use the pi read tool to read payload.txt and the listed pi-probe skill file. Call context_probe once. Reply with the project word, file word, skill word and tool word. No other files or shell commands.",
       );
       const text = first.content.map((b: any) => b.text ?? "").join("\n");
       for (const word of ["PI_PROJECT", "PI_FILE", "PI_SKILL", "PI_TOOL"])
@@ -203,9 +218,7 @@ describe.skipIf(!LIVE)("live pi-context / native-tools policy", () => {
       ).toHaveLength(1);
       expect(init.tools).toEqual(
         expect.arrayContaining([
-          "Read",
-          "Edit",
-          "Bash",
+          "mcp__custom-tools__read",
           "mcp__custom-tools__context_probe",
         ]),
       );
@@ -218,10 +231,12 @@ describe.skipIf(!LIVE)("live pi-context / native-tools policy", () => {
       expect(existsSync(join(ws, "foreign-hook-ran"))).toBe(false);
       expect(existsSync(join(ws, "foreign-mcp-ran"))).toBe(false);
       expect(existsSync(join(ws, "host-hook-ran"))).toBe(true);
-      const cliId = getCliSession(sessionId)!;
-      const saved = getSystemPrompt(cliId)!;
-      expect(saved.match(/<project_context>/g)).toHaveLength(1);
-      expect(saved.match(/<available_skills>/g)).toHaveLength(1);
+      expect(getCliSession(sessionId)).toBeUndefined();
+      expect(
+        init.tools.filter(
+          (name: string) => !name.startsWith("mcp__custom-tools__"),
+        ),
+      ).toEqual([]);
       const second = await turn(
         "Repeat the four words from your previous answer. No tools.",
       );
@@ -230,24 +245,39 @@ describe.skipIf(!LIVE)("live pi-context / native-tools policy", () => {
           second.content.map((b: any) => b.text ?? "").join("\n"),
         ).toContain(word);
       expect(processes).toHaveLength(1);
-      expect(getCliSession(sessionId)).toBe(cliId);
-      expect(getSystemPrompt(cliId)).toBe(saved);
+      messages.push(
+        { role: "user", content: "Remember NATIVE_HANDOFF_793." },
+        {
+          role: "assistant",
+          provider: "openai-codex",
+          api: "openai-codex-responses",
+          content: [{ type: "text", text: "Remembered NATIVE_HANDOFF_793." }],
+        },
+      );
+      const third = await turn(
+        "What word did the other provider just remember? Reply with it only, no tools.",
+      );
+      expect(third.content.map((b: any) => b.text ?? "").join("")).toContain(
+        "NATIVE_HANDOFF_793",
+      );
+      expect(processes).toHaveLength(2);
+      await takeParkedCliProcess(sessionId)?.retire();
       const root = join(
         process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"),
         "projects",
       );
-      transcript = readdirSync(root)
-        .map((dir) => join(root, dir, `${cliId}.jsonl`))
-        .find(existsSync);
-      expect(transcript).toBeTruthy();
-      const raw = readFileSync(transcript!, "utf8");
-      expect(raw).not.toContain("CLI_ONLY_CONTEXT_SENTINEL");
-      expect(raw).not.toContain("CLI_ONLY_SKILL_SENTINEL");
-      expect(raw).not.toContain("CLI_ONLY_AGENT_SENTINEL");
+      for (const cliId of cliIds) {
+        expect(
+          readdirSync(root).some((dir) =>
+            existsSync(join(root, dir, `${cliId}.jsonl`)),
+          ),
+        ).toBe(false);
+      }
+      expect(existsSync(join(ws, "state", "session-map.json"))).toBe(false);
       console.log(
         JSON.stringify({
-          proof: "pi-context-native-tools",
-          promptCharacters: saved.length,
+          proof: "pi-owned-default",
+          promptCharacters: prompt.length,
           piProjectCopies: 1,
           piSkillIndexes: 1,
           nativeSkillCount: (init.skills ?? []).length,
@@ -272,7 +302,6 @@ describe.skipIf(!LIVE)("live pi-context / native-tools policy", () => {
     cleanupMcpConfigFiles();
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
-    if (transcript) rmSync(transcript, { force: true });
     if (ws) rmSync(ws, { recursive: true, force: true });
   });
 });

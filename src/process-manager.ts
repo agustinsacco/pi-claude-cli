@@ -96,11 +96,6 @@ export function spawnClaude(
       "Unset CLAUDE_CODE_SIMPLE/CLAUDE_CODE_SAFE_MODE: pi context requires subscription authentication and the explicit MCP bridge.",
     );
   }
-  if (piContext && options?.systemPromptMode === "pi") {
-    throw new ContextPolicyError(
-      "PI_CLAUDE_CLI_CONTEXT=pi retains Claude Code's default system prompt.",
-    );
-  }
   const args = [
     "-p",
     "--input-format",
@@ -146,10 +141,16 @@ export function spawnClaude(
     args.push("--setting-sources", "");
   }
   if (piContext) {
-    args.push("--disable-slash-commands", "--no-chrome");
+    args.push(
+      "--disable-slash-commands",
+      "--no-chrome",
+      "--tools",
+      "",
+      "--no-session-persistence",
+    );
   }
 
-  if (options?.resumeSessionId) {
+  if (!piContext && options?.resumeSessionId) {
     // Resume an existing session — CLI loads prior conversation from disk
     args.push("--resume", options.resumeSessionId);
   } else if (options?.newSessionId) {
@@ -157,7 +158,7 @@ export function spawnClaude(
     args.push("--session-id", options.newSessionId);
   }
 
-  if (systemPrompt) {
+  if (systemPrompt || piContext) {
     // Write the system prompt to a temp file and pass the FILE flags.
     //
     // `--system-prompt` / `--append-system-prompt` take a literal string, NOT
@@ -176,13 +177,15 @@ export function spawnClaude(
     const tmpFile = systemPromptFilePath(
       options?.resumeSessionId ?? options?.newSessionId,
     );
-    writeFileSync(tmpFile, systemPrompt, {
+    writeFileSync(tmpFile, systemPrompt ?? "", {
       encoding: "utf-8",
       mode: RUNTIME_FILE_MODE,
     });
     // `pi` mode replaces Claude Code's prompt outright; `claude` mode layers
     // pi's on top of it. See src/system-prompt-mode.ts for the trade-off.
-    const mode = options?.systemPromptMode ?? DEFAULT_SYSTEM_PROMPT_MODE;
+    const mode = piContext
+      ? "pi"
+      : (options?.systemPromptMode ?? DEFAULT_SYSTEM_PROMPT_MODE);
     args.push(
       mode === "pi" ? "--system-prompt-file" : "--append-system-prompt-file",
       tmpFile,
@@ -211,7 +214,7 @@ export function spawnClaude(
   // a host can change the setting without restarting pi; the flag is
   // config, not context, so changing it never invalidates the prompt cache.
   const autocompact = resolveAutocompact();
-  if (autocompact !== undefined) {
+  if (!piContext && autocompact !== undefined) {
     args.push("--autocompact", autocompact);
   }
 
@@ -229,6 +232,9 @@ export function spawnClaude(
       CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1",
       CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
       ENABLE_CLAUDEAI_MCP_SERVERS: "false",
+      DISABLE_AUTO_COMPACT: "1",
+      DISABLE_COMPACT: "1",
+      ENABLE_TOOL_SEARCH: "false",
     });
   }
   if (!env.MCP_TOOL_TIMEOUT)

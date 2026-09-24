@@ -15,7 +15,7 @@
 const args = process.argv.slice(2);
 
 if (args.includes("--version")) {
-  console.log("9.9.9-stub (Claude Code)");
+  console.log("9.9.9 (Claude Code stub)");
   process.exit(0);
 }
 if (args[0] === "auth" && args[1] === "status") {

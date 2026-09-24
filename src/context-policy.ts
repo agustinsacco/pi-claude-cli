@@ -21,7 +21,7 @@ export function assertContextCliVersion(output: string): void {
 }
 
 export function usesPiContext(env: NodeJS.ProcessEnv = process.env): boolean {
-  const value = (env.PI_CLAUDE_CLI_CONTEXT ?? "legacy").trim().toLowerCase();
+  const value = (env.PI_CLAUDE_CLI_CONTEXT ?? "pi").trim().toLowerCase();
   if (value === "pi") return true;
   if (!value || value === "legacy") return false;
   throw new ContextPolicyError(
