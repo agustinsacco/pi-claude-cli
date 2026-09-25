@@ -32,6 +32,8 @@ import {
   buildPrompt,
   buildSystemPrompt,
   buildResumePrompt,
+  repairStoredSystemPrompt,
+  withoutSystemMessages,
 } from "./prompt-builder.js";
 import { resolveSystemPromptMode } from "./system-prompt-mode.js";
 import {
@@ -229,6 +231,10 @@ type StreamViaCLiOptions = SimpleStreamOptions & {
  * an assistant turn from another provider (model switch) after — or with no —
  * pi-claude-cli turn means the CLI never saw that exchange. Resuming would
  * answer from a conversation missing turns, so reimport instead.
+ *
+ * Only assistant turns are consulted. A system message (pi 0.86+ prompt or
+ * tool-loadout change) after our last turn does not make the session stale:
+ * it is prompt, not an exchange the CLI missed.
  */
 function cliSessionIsStale(messages: any[]): boolean {
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -239,7 +245,12 @@ function cliSessionIsStale(messages: any[]): boolean {
   return false; // no assistant turns at all: nothing to be behind
 }
 
-/** Messages after the last assistant turn: what this call adds. */
+/**
+ * Messages after the last assistant turn: what this call adds. System
+ * messages are excluded; a live or resumed CLI process keeps the prompt it
+ * was spawned with, so they are nothing it can be handed (and must not stop
+ * a handoff whose delta is otherwise exactly its tool results).
+ */
 function deltaMessages(messages: any[]): any[] {
   let lastAssistantIdx = -1;
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -248,7 +259,7 @@ function deltaMessages(messages: any[]): any[] {
       break;
     }
   }
-  return messages.slice(lastAssistantIdx + 1);
+  return withoutSystemMessages(messages.slice(lastAssistantIdx + 1));
 }
 
 /** pi toolResult content → MCP tool result the CLI understands. */
@@ -480,7 +491,24 @@ export function streamViaCli(
         const storedSystemPrompt = resumeSessionId
           ? getSystemPrompt(resumeSessionId)
           : undefined;
+        // Except a stored prompt that never got pi's in (sessions created
+        // under pi 0.86+ before the prompt was read from system messages):
+        // replace it once, now that a real one is available. One cache miss,
+        // then the repaired bytes are what every later turn replays.
+        const repairedSystemPrompt =
+          resumeSessionId && storedSystemPrompt !== undefined
+            ? repairStoredSystemPrompt(
+                storedSystemPrompt,
+                context,
+                cwd,
+                systemPromptMode,
+              )
+            : undefined;
+        if (resumeSessionId && repairedSystemPrompt !== undefined) {
+          setSystemPrompt(resumeSessionId, repairedSystemPrompt);
+        }
         const systemPrompt =
+          repairedSystemPrompt ??
           storedSystemPrompt ??
           buildSystemPrompt(context, cwd, systemPromptMode);
 

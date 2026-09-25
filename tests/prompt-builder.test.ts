@@ -1,5 +1,17 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { buildPrompt, buildResumePrompt } from "../src/prompt-builder";
+import {
+  buildPrompt,
+  buildResumePrompt,
+  resolveSystemPrompt,
+} from "../src/prompt-builder";
+import {
+  ARTIFACT_TOOL,
+  PI_087_PROMPT,
+  PI_087_SECTIONS,
+  leadingSystemMessage,
+  sectionPatch,
+  toolChange,
+} from "./fixtures/pi-transcript";
 
 describe("buildPrompt", () => {
   it("returns empty string for empty messages array", () => {
@@ -1142,5 +1154,305 @@ describe("buildResumePrompt — tool-loop delta (regression)", () => {
     const result = buildResumePrompt(context) as string;
     expect(result).toContain("RESULT-2");
     expect(result).toContain("actually, do this instead");
+  });
+});
+
+/**
+ * pi 0.86+ sends no `Context.systemPrompt`; the prompt is in `role: "system"`
+ * messages (tests/fixtures/pi-transcript.ts). Reading only `systemPrompt`
+ * made every new session's stored prompt the provider's own framing alone.
+ */
+describe("resolveSystemPrompt", () => {
+  const user = { role: "user", content: "hi" };
+  const assistant = { role: "assistant", content: "hello" };
+
+  it("returns a legacy Context.systemPrompt byte for byte", () => {
+    const prompt = "You are helpful.\n\nAvailable tools:\n- read: Read files\n";
+    expect(
+      resolveSystemPrompt({ systemPrompt: prompt, messages: [user] }),
+    ).toBe(prompt);
+  });
+
+  it("renders the leading system message of a pi 0.87.1 transcript", () => {
+    expect(
+      resolveSystemPrompt({ messages: [leadingSystemMessage(), user] }),
+    ).toBe(PI_087_PROMPT);
+  });
+
+  it("never renders the declared tools: the CLI has its own, plus MCP", () => {
+    const out = resolveSystemPrompt({ messages: [leadingSystemMessage()] });
+    expect(out).not.toContain("TOOL-DESCRIPTION-SENTINEL");
+    expect(out).not.toContain(ARTIFACT_TOOL.name);
+  });
+
+  it("returns empty when neither a systemPrompt nor a system message exists", () => {
+    expect(resolveSystemPrompt({ messages: [user] })).toBe("");
+    expect(resolveSystemPrompt({ systemPrompt: "", messages: [] })).toBe("");
+    expect(resolveSystemPrompt({} as any)).toBe("");
+  });
+
+  it("replays later section patches in place, and null removes a section", () => {
+    const out = resolveSystemPrompt({
+      messages: [
+        leadingSystemMessage(),
+        user,
+        assistant,
+        sectionPatch({ cwd: "<cwd>\n/work/other\n</cwd>", docs: null }),
+        user,
+      ],
+    });
+    const { docs: _docs, ...rest } = PI_087_SECTIONS;
+    expect(out).toBe(
+      Object.values({ ...rest, cwd: "<cwd>\n/work/other\n</cwd>" }).join(
+        "\n\n",
+      ),
+    );
+  });
+
+  it("moves a removed-then-restored section to the end, as pi-ai's Map does", () => {
+    const out = resolveSystemPrompt({
+      messages: [
+        leadingSystemMessage(),
+        sectionPatch({ tools: null }, 2_000),
+        sectionPatch({ tools: "<tools>\nNEW\n</tools>" }, 3_000),
+      ],
+    });
+    expect(
+      out.endsWith("<cwd>\n/work/app\n</cwd>\n\n<tools>\nNEW\n</tools>"),
+    ).toBe(true);
+  });
+
+  it("appends later content after the base content, before the sections", () => {
+    const out = resolveSystemPrompt({
+      systemPrompt: "BASE",
+      messages: [
+        { role: "system", content: "", sections: { a: "A" }, timestamp: 1 },
+        { role: "system", content: "APPENDED", timestamp: 2 },
+      ],
+    });
+    expect(out).toBe("BASE\n\nAPPENDED\n\nA");
+  });
+
+  it("joins text blocks of array content and ignores other blocks", () => {
+    const out = resolveSystemPrompt({
+      messages: [
+        {
+          role: "system",
+          content: [
+            { type: "text", text: "one" },
+            { type: "image", data: "x", mimeType: "image/png" },
+            { type: "text", text: "two" },
+          ],
+          timestamp: 1,
+        },
+      ],
+    });
+    expect(out).toBe("one\ntwo");
+  });
+
+  it("resolves a pre-0.86 session, whose prompt arrives in a later system message", () => {
+    // pi: "Sessions created before system messages existed have no leading
+    // system message; the first request declares the current prompt as a
+    // later system message, which replays the same way."
+    const out = resolveSystemPrompt({
+      messages: [user, assistant, { ...leadingSystemMessage() }, user],
+    });
+    expect(out).toBe(PI_087_PROMPT);
+  });
+
+  it("ignores tool-only system messages and malformed section values", () => {
+    const out = resolveSystemPrompt({
+      messages: [
+        leadingSystemMessage(),
+        toolChange(),
+        { role: "system", content: 42, sections: "nope", timestamp: 3 },
+        { role: "system", content: "", sections: { cwd: 7 }, timestamp: 4 },
+      ],
+    });
+    expect(out).toBe(PI_087_PROMPT);
+  });
+});
+
+describe("system messages are prompt, not history", () => {
+  const withSystem = [
+    leadingSystemMessage(),
+    { role: "user", content: "Read the file" },
+    {
+      role: "assistant",
+      content: [{ type: "toolCall", name: "read", arguments: { path: "/a" } }],
+    },
+    { role: "toolResult", toolName: "read", content: "contents" },
+    sectionPatch({ cwd: "<cwd>\nSYSTEM-UPDATE-SENTINEL\n</cwd>" }),
+    toolChange(),
+    { role: "user", content: "Explain it" },
+  ];
+  const withoutSystem = withSystem.filter((m) => m.role !== "system");
+
+  it("buildPrompt drops leading and mid-conversation system messages", () => {
+    const out = buildPrompt({ messages: withSystem }) as string;
+    expect(out).toBe(buildPrompt({ messages: withoutSystem }));
+    expect(out).not.toContain("SYSTEM-UPDATE-SENTINEL");
+    expect(out).not.toContain(PI_087_SECTIONS.preamble);
+    expect(out.startsWith("USER:\nRead the file")).toBe(true);
+  });
+
+  it("buildPrompt's image path drops them too", () => {
+    const messages = [
+      ...withSystem.slice(0, -1),
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Explain this" },
+          { type: "image", data: "abc", mimeType: "image/png" },
+        ],
+      },
+    ];
+    const out = buildPrompt({ messages }) as any[];
+    expect(Array.isArray(out)).toBe(true);
+    expect(out[0].text).not.toContain("SYSTEM-UPDATE-SENTINEL");
+    expect(out[0].text).not.toContain(PI_087_SECTIONS.preamble);
+    expect(out[out.length - 1].type).toBe("image");
+  });
+
+  it("the custom-tool shortcut looks past interleaved system messages", () => {
+    const out = buildPrompt({
+      messages: [
+        leadingSystemMessage(),
+        { role: "user", content: "Deploy it" },
+        {
+          role: "assistant",
+          content: [{ type: "toolCall", name: "deploy", arguments: {} }],
+        },
+        toolChange(),
+        { role: "toolResult", toolName: "deploy", content: "deployed" },
+      ],
+    }) as string;
+    expect(out).toContain("Deploy it");
+    expect(out).toContain("[The deploy tool was called");
+    expect(out).toContain("deployed");
+  });
+
+  it("buildResumePrompt sends only the new user text, not a system update", () => {
+    expect(buildResumePrompt({ messages: withSystem.slice(1) })).toBe(
+      "TOOL RESULT (historical Read):\ncontents\nExplain it",
+    );
+  });
+
+  it("buildResumePrompt has nothing to send when only a system message is new", () => {
+    expect(
+      buildResumePrompt({
+        messages: [
+          { role: "user", content: "hi" },
+          { role: "assistant", content: "hello" },
+          sectionPatch({ cwd: "<cwd>\n/x\n</cwd>" }),
+        ],
+      }),
+    ).toBe("");
+  });
+});
+
+describe("stored prompts built without pi's prompt", () => {
+  // Every session created under pi 0.86+ before the fix stored the provider's
+  // own framing alone: the policy block (pi context), or AGENTS.md and/or
+  // the tool-results paragraph (legacy).
+  const AGENTS = "# Rules\nRun npm test.";
+  const TOOL_RESULT = { role: "toolResult", toolName: "read", content: "x" };
+  const transcript = {
+    messages: [
+      leadingSystemMessage(),
+      { role: "user", content: "hi" },
+      TOOL_RESULT,
+    ],
+  };
+
+  beforeEach(() => {
+    vi.resetModules();
+    vi.doMock("node:fs", () => ({
+      existsSync: (path: string) => path.endsWith("AGENTS.md"),
+      readFileSync: () => AGENTS,
+    }));
+  });
+
+  afterEach(() => {
+    vi.doUnmock("node:fs");
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it("recognises every legacy build that lacks pi's prompt", async () => {
+    const pb = await import("../src/prompt-builder");
+    const agentsOnly = pb.buildSystemPrompt({ messages: [] }, "/p");
+    const agentsAndParagraph = pb.buildSystemPrompt(
+      { messages: [TOOL_RESULT] },
+      "/p",
+    );
+    const paragraph = agentsAndParagraph.slice(AGENTS.length + 2);
+    expect(agentsOnly).toBe(AGENTS);
+    expect(paragraph.startsWith("IMPORTANT:")).toBe(true);
+    expect(pb.isBrokenStoredPrompt(agentsOnly, "/p")).toBe(true);
+    expect(pb.isBrokenStoredPrompt(agentsAndParagraph, "/p")).toBe(true);
+    // Built where no AGENTS.md was found: broken whatever AGENTS.md says now.
+    expect(pb.isBrokenStoredPrompt(paragraph, "/p")).toBe(true);
+  });
+
+  it("does not flag a prompt that carries pi's, or one from an older AGENTS.md", async () => {
+    const pb = await import("../src/prompt-builder");
+    expect(
+      pb.isBrokenStoredPrompt(pb.buildSystemPrompt(transcript, "/p"), "/p"),
+    ).toBe(false);
+    expect(pb.isBrokenStoredPrompt("# Rules\nOld wording.", "/p")).toBe(false);
+  });
+
+  it("recognises a policy-only pi-context prompt", async () => {
+    const pb = await import("../src/prompt-builder");
+    const { alignPiContext } = await import("../src/context-policy");
+    expect(pb.isBrokenStoredPrompt(alignPiContext(""), "/p")).toBe(true);
+    expect(pb.isBrokenStoredPrompt(alignPiContext(PI_087_PROMPT), "/p")).toBe(
+      false,
+    );
+  });
+
+  it("repairs a broken legacy prompt with the rebuilt one", async () => {
+    const pb = await import("../src/prompt-builder");
+    const broken = pb.buildSystemPrompt({ messages: [TOOL_RESULT] }, "/p");
+    const repaired = pb.repairStoredSystemPrompt(broken, transcript, "/p");
+    expect(repaired).toBe(pb.buildSystemPrompt(transcript, "/p"));
+    expect(repaired!.startsWith(PI_087_PROMPT)).toBe(true);
+  });
+
+  it("repairs a policy-only prompt in pi context, keeping the policy", async () => {
+    vi.stubEnv("PI_CLAUDE_CLI_CONTEXT", "pi");
+    const pb = await import("../src/prompt-builder");
+    const { alignPiContext } = await import("../src/context-policy");
+    expect(
+      pb.repairStoredSystemPrompt(alignPiContext(""), transcript, "/p"),
+    ).toBe(alignPiContext(PI_087_PROMPT));
+  });
+
+  it("keeps the stored prompt when there is nothing better, or it is not broken", async () => {
+    const pb = await import("../src/prompt-builder");
+    const broken = pb.buildSystemPrompt({ messages: [TOOL_RESULT] }, "/p");
+    // No pi prompt in this request either: rebuilding would change nothing.
+    expect(
+      pb.repairStoredSystemPrompt(broken, { messages: [TOOL_RESULT] }, "/p"),
+    ).toBeUndefined();
+    expect(
+      pb.repairStoredSystemPrompt("A GOOD PROMPT", transcript, "/p"),
+    ).toBeUndefined();
+  });
+
+  it("never swaps the context policy under the guard's feet", async () => {
+    const pb = await import("../src/prompt-builder");
+    const { alignPiContext } = await import("../src/context-policy");
+    // Stored under pi context, but the environment now builds legacy.
+    expect(
+      pb.repairStoredSystemPrompt(alignPiContext(""), transcript, "/p"),
+    ).toBeUndefined();
+    // pi context outside claude mode is refused by the build; resume must not
+    // start throwing, so the stored prompt stays.
+    vi.stubEnv("PI_CLAUDE_CLI_CONTEXT", "pi");
+    expect(
+      pb.repairStoredSystemPrompt(alignPiContext(""), transcript, "/p", "pi"),
+    ).toBeUndefined();
   });
 });

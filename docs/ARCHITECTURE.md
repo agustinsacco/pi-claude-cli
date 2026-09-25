@@ -61,6 +61,48 @@ unsuffixed `--append-system-prompt` takes a literal string, and handing it a
 path silently makes the path itself the prompt; also avoids Windows
 `ENAMETOOLONG`).
 
+### pi 0.86+: the prompt is in the transcript (unreleased)
+
+pi ≤0.85 handed providers `Context.systemPrompt`. From 0.86, pi-ai's
+`normalizeContext` folds it into a leading `role: "system"` message and the
+provider receives no `systemPrompt` at all; pi-coding-agent writes its prompt
+as named `sections` on that message and patches them with later system
+messages (tool-loadout changes ride there too, as `toolsAdded` /
+`toolsRemoved`). The provider kept reading the absent field, so every
+session created under pi 0.86+ got the provider's framing alone: the policy
+block (`alignPiContext("")`) in pi context, AGENTS.md and/or the
+tool-results paragraph in legacy mode. That is what it stored and replayed.
+
+`resolveSystemPrompt` (src/prompt-builder.ts) mirrors pi-ai 0.87.1's
+`normalizeContext` + `getCurrentSystemPrompt`: a non-empty `systemPrompt`
+becomes the first system message, then every system message is replayed
+(content appended, sections patched by name, `null` removing). A legacy
+context yields its `systemPrompt` byte for byte. Tools are never rendered
+into the text: the CLI has its own natives, and pi's custom tools arrive
+through the MCP schema server.
+
+**Mid-conversation system messages** are handled the way pi-ai handles them
+for every model that cannot take system messages in-band
+(`collapseSystemMessages`): folded into the one prompt, never into the
+conversation. The CLI's stream-json input has no system role, so that is
+the only faithful mapping.
+
+- A fresh or reimported session is spawned with the replayed current
+  prompt, patches included.
+- A resumed session replays its stored prompt, exactly as before 0.86 (when
+  a changed `systemPrompt` was likewise ignored on resume). Section patches
+  take effect at the next fresh CLI session.
+- System messages are never rendered as history, never count as the delta a
+  resumed or parked process is handed, and never make the CLI session
+  stale.
+
+Rendering updates into the user turn instead was rejected. It would demote
+system-prompt text to user-turn authority, and it would duplicate the whole
+prompt for a pre-0.86 session: pi declares that session's entire prompt in a
+later system message on its first 0.86+ request. Re-pinning the stored
+prompt on every patch was rejected too, because it costs a respawn and a
+full cache miss per change.
+
 ### Spawn
 
 ```
@@ -564,12 +606,24 @@ created with.
   re-bills the transcript as cache write (measured 2026-08-29: 9,761 write
   tokens without it, 112 with it). Verbatim rather than rebuilt because
   `buildSystemPrompt` is not byte-stable across turns.
+
   > **Correction (2026-08-29, same day):** this section and the fix it
   > describes used the unsuffixed `--system-prompt` / `--append-system-prompt`
   > flags. Those take a literal string, not a path, and the provider was
   > passing a temp-file path — so pi's instructions never reached the model on
   > **any** turn, including the first, for as long as the provider has
   > supported a system prompt. Fixed by switching to the `-file` variants.
+
+  **Repair (unreleased).** The one exception to "verbatim" is a stored
+  prompt that never got pi's in (see "pi 0.86+" above;
+  `isBrokenStoredPrompt`). Such a prompt is rebuilt, re-stored and passed
+  instead, once, costing one cache miss. It is repaired only when this
+  request carries a real pi prompt and the rebuild keeps the stored prompt's
+  context policy, and only after `assertContextPolicy`, which is unchanged.
+  In pi context, broken means the policy block with nothing after it. In
+  legacy mode, broken means the tool-results paragraph alone, or exactly
+  the current AGENTS.md rendering (optionally followed by the paragraph).
+
 - **Create/import:** no mapping, stale, resume miss, or failed prior turn →
   fresh provider-minted UUID under `--session-id`, full flattened history,
   system prompt attached, mapping recorded. Never pi's id — the CLI refuses
@@ -703,28 +757,29 @@ fires, and the turn looks truncated. This was the root cause behind every
 
 ## Version history of behavioral fixes
 
-| Version | Change                                                                                                                                                                                                                |
-| ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0.4.0   | Port to `@earendil-works` pi 0.84; api-registry registration; scoped release                                                                                                                                          |
-| 0.4.1   | 2.x control protocol; cycle-aware bridge (ordering, cumulative usage, final-answer safety net); CLI-side tool markers; 300s timeout                                                                                   |
-| 0.4.2   | Resume-miss → one full-replay retry (fixes forked sessions)                                                                                                                                                           |
-| 0.4.3   | Overflow → `context_length_exceeded` rewrite (pi auto-compaction); hermetic mode                                                                                                                                      |
-| 0.4.4   | Lazy thinking materialization (no empty blocks for encrypted thinking); explicit `contentIndex` per tracked block                                                                                                     |
-| 0.4.5   | `rate_limit_event` → `claude-rate-limit` status key for front-ends                                                                                                                                                    |
-| 0.4.6   | Resume delta anchors on the last **assistant** message — stops full-transcript replay on every tool iteration                                                                                                         |
-| 0.4.9   | `utilization` on `claude-rate-limit` (percentage of the binding window)                                                                                                                                               |
-| 0.4.10  | `usage.totalTokens` = last cycle's prompt, not the summed cycles (fixes inflated context gauges and premature auto-compaction); billing reads `modelUsage`, so sub-agent spend is no longer invisible                 |
-| 0.4.12  | `--effort` maps 1:1 for every model; the opus up-shift (`high`→`max`) is gone, so a host asking for `high` gets `high`                                                                                                |
-| 0.4.13  | Sub-agent lifecycle surfaced: `task_started`/`task_notification` as markers, `task_progress` on the `claude-subagents` status key                                                                                     |
-| 0.4.14  | Background sub-agents run to completion and report back (a `result` with agents pending is a cycle, not the end); non-agent tasks and orphan notifications no longer reported as agents; `AskUserQuestion` disallowed |
-| 0.4.15  | System prompt re-sent on `--resume` (the CLI drops it), replayed verbatim from the sidecar so the cached prefix survives                                                                                              |
-| 0.4.16  | System prompt passed via the `-file` flag variants — the unsuffixed flags take a literal string, so pi's instructions had never reached the model                                                                     |
-| 0.5.0   | `--autocompact 200000` by default (`PI_CLAUDE_CLI_AUTOCOMPACT`)                                                                                                                                                       |
-| 0.5.1   | `PI_CLAUDE_CLI_STRICT_MCP`; the tool schema follows pi's registry instead of freezing at turn 1                                                                                                                       |
-| 0.5.2   | A tool call with no arguments reaches pi as `{}`                                                                                                                                                                      |
-| 0.6.0   | CLI-side tool results forwarded as paired `result` markers (`PI_CLAUDE_CLI_TOOL_RESULTS=1`)                                                                                                                           |
-| 0.6.1   | A `result` with no content and no tokens (the CLI answering its own queued task notification) is a cycle boundary, not the turn's end                                                                                 |
-| 0.7.0   | One CLI process per pi session: custom-tool calls proxied through the MCP server instead of interrupt-and-resume, process parked between turns — no more full-context re-bill after a commit or branch rename         |
+| Version    | Change                                                                                                                                                                                                                                                                          |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0.4.0      | Port to `@earendil-works` pi 0.84; api-registry registration; scoped release                                                                                                                                                                                                    |
+| 0.4.1      | 2.x control protocol; cycle-aware bridge (ordering, cumulative usage, final-answer safety net); CLI-side tool markers; 300s timeout                                                                                                                                             |
+| 0.4.2      | Resume-miss → one full-replay retry (fixes forked sessions)                                                                                                                                                                                                                     |
+| 0.4.3      | Overflow → `context_length_exceeded` rewrite (pi auto-compaction); hermetic mode                                                                                                                                                                                                |
+| 0.4.4      | Lazy thinking materialization (no empty blocks for encrypted thinking); explicit `contentIndex` per tracked block                                                                                                                                                               |
+| 0.4.5      | `rate_limit_event` → `claude-rate-limit` status key for front-ends                                                                                                                                                                                                              |
+| 0.4.6      | Resume delta anchors on the last **assistant** message — stops full-transcript replay on every tool iteration                                                                                                                                                                   |
+| 0.4.9      | `utilization` on `claude-rate-limit` (percentage of the binding window)                                                                                                                                                                                                         |
+| 0.4.10     | `usage.totalTokens` = last cycle's prompt, not the summed cycles (fixes inflated context gauges and premature auto-compaction); billing reads `modelUsage`, so sub-agent spend is no longer invisible                                                                           |
+| 0.4.12     | `--effort` maps 1:1 for every model; the opus up-shift (`high`→`max`) is gone, so a host asking for `high` gets `high`                                                                                                                                                          |
+| 0.4.13     | Sub-agent lifecycle surfaced: `task_started`/`task_notification` as markers, `task_progress` on the `claude-subagents` status key                                                                                                                                               |
+| 0.4.14     | Background sub-agents run to completion and report back (a `result` with agents pending is a cycle, not the end); non-agent tasks and orphan notifications no longer reported as agents; `AskUserQuestion` disallowed                                                           |
+| 0.4.15     | System prompt re-sent on `--resume` (the CLI drops it), replayed verbatim from the sidecar so the cached prefix survives                                                                                                                                                        |
+| 0.4.16     | System prompt passed via the `-file` flag variants — the unsuffixed flags take a literal string, so pi's instructions had never reached the model                                                                                                                               |
+| 0.5.0      | `--autocompact 200000` by default (`PI_CLAUDE_CLI_AUTOCOMPACT`)                                                                                                                                                                                                                 |
+| 0.5.1      | `PI_CLAUDE_CLI_STRICT_MCP`; the tool schema follows pi's registry instead of freezing at turn 1                                                                                                                                                                                 |
+| 0.5.2      | A tool call with no arguments reaches pi as `{}`                                                                                                                                                                                                                                |
+| 0.6.0      | CLI-side tool results forwarded as paired `result` markers (`PI_CLAUDE_CLI_TOOL_RESULTS=1`)                                                                                                                                                                                     |
+| 0.6.1      | A `result` with no content and no tokens (the CLI answering its own queued task notification) is a cycle boundary, not the turn's end                                                                                                                                           |
+| 0.7.0      | One CLI process per pi session: custom-tool calls proxied through the MCP server instead of interrupt-and-resume, process parked between turns — no more full-context re-bill after a commit or branch rename                                                                   |
+| Unreleased | pi's system prompt is read from the transcript's system messages. pi 0.86+ sends no `Context.systemPrompt`, so sessions had been created with only the provider's framing, and those stored prompts are now repaired on resume. System messages never count as history or delta |
 
 ## Testing
 

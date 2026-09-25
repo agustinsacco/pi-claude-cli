@@ -6,7 +6,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -61,8 +61,17 @@ import {
 } from "../src/handoff-broker";
 import type { HandoffResult } from "../src/handoff-broker";
 import { resetMcpConfigCache } from "../src/mcp-config";
-import { getSystemPrompt } from "../src/session-map";
-import { PI_CONTEXT_MARKER } from "../src/context-policy";
+import {
+  getSystemPrompt,
+  setCliSession,
+  setSystemPrompt,
+} from "../src/session-map";
+import { PI_CONTEXT_MARKER, alignPiContext } from "../src/context-policy";
+import {
+  PI_087_PROMPT,
+  leadingSystemMessage,
+  toolChange,
+} from "./fixtures/pi-transcript";
 
 const model = {
   id: "claude-opus-5",
@@ -243,6 +252,79 @@ describe("persistent CLI process", () => {
       expect(doneOf(1).message.errorMessage).toContain("fresh pi session");
       expect(Array.isArray(doneOf(1).message.content)).toBe(true);
     });
+
+    const resumedTurn = () => ({
+      messages: [
+        leadingSystemMessage(),
+        { role: "user", content: "first" },
+        ourAssistant([{ type: "text", text: "one" }]),
+        { role: "user", content: "second" },
+      ],
+    });
+    const sentPrompt = (i: number) => {
+      const args = spawnArgs(i);
+      return readFileSync(
+        args[args.indexOf("--append-system-prompt-file") + 1],
+        "utf-8",
+      );
+    };
+
+    it("repairs a policy-only stored prompt on resume, and the policy guard still passes", async () => {
+      // Sessions created under pi 0.86+ before the fix stored alignPiContext("").
+      process.env.PI_CLAUDE_CLI_CONTEXT = "pi";
+      setCliSession("pi-policy-only", "cli-policy-only");
+      setSystemPrompt("cli-policy-only", alignPiContext(""));
+
+      streamViaCli(model, resumedTurn(), opts("pi-policy-only") as any);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(spawn).toHaveBeenCalledTimes(1);
+      const args = spawnArgs(0);
+      expect(args[args.indexOf("--resume") + 1]).toBe("cli-policy-only");
+      expect(sentPrompt(0)).toBe(alignPiContext(PI_087_PROMPT));
+      expect(getSystemPrompt("cli-policy-only")).toBe(
+        alignPiContext(PI_087_PROMPT),
+      );
+      procAt(0).stdout.write(
+        startCycle({ input_tokens: 1 }) +
+          text("two") +
+          endCycle("end_turn") +
+          result({}),
+      );
+      await vi.advanceTimersByTimeAsync(10);
+      expect(doneOf(0).message.stopReason).toBe("stop");
+    });
+
+    it("replays a pi-context stored prompt that carries pi's prompt verbatim", async () => {
+      process.env.PI_CLAUDE_CLI_CONTEXT = "pi";
+      const kept = alignPiContext("OLDER PI PROMPT");
+      setCliSession("pi-kept", "cli-kept");
+      setSystemPrompt("cli-kept", kept);
+
+      streamViaCli(model, resumedTurn(), opts("pi-kept") as any);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(sentPrompt(0)).toBe(kept);
+      expect(getSystemPrompt("cli-kept")).toBe(kept);
+    });
+
+    it("still refuses a policy change before any repair is considered", async () => {
+      // Stored under legacy (and broken), resumed under pi context: the guard
+      // wins; the repair never gets to rewrite across policies.
+      process.env.PI_CLAUDE_CLI_CONTEXT = "pi";
+      setCliSession("pi-crossed", "cli-crossed");
+      setSystemPrompt("cli-crossed", "IMPORTANT: legacy leftovers");
+
+      streamViaCli(model, resumedTurn(), opts("pi-crossed") as any);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(spawn).not.toHaveBeenCalled();
+      expect(doneOf(0).message.stopReason).toBe("error");
+      expect(doneOf(0).message.errorMessage).toContain("fresh pi session");
+      expect(getSystemPrompt("cli-crossed")).toBe(
+        "IMPORTANT: legacy leftovers",
+      );
+    });
   });
 
   describe("proxied handoff", () => {
@@ -398,6 +480,54 @@ describe("persistent CLI process", () => {
       });
       expect(answers[0].content[0]).toEqual({ type: "text", text: "deployed" });
       expect(spawn).toHaveBeenCalledTimes(1);
+    });
+
+    it("continues the handoff in-process when pi also declared a system message", async () => {
+      // pi 0.86+ can add a system message (a tool-loadout change, a prompt
+      // patch) next to the tool results. It is not something the blocked
+      // process could be handed, so it must not make the delta "not exactly
+      // the awaited results" and force a retire-and-resume.
+      const ctx1 = {
+        messages: [leadingSystemMessage(), { role: "user", content: "go" }],
+      };
+      streamViaCli(model, ctx1, opts("pi-sys") as any);
+      await vi.advanceTimersByTimeAsync(0);
+      const proc = procAt(0);
+      const cliId = cliIdOf(0);
+      proc.stdout.write(
+        startCycle({ input_tokens: 1 }) +
+          handoffToolUse("t9", "mcp__custom-tools__deploy", {}) +
+          endCycle("tool_use"),
+      );
+      await vi.advanceTimersByTimeAsync(10);
+      const answers: HandoffResult[] = [];
+      dispatchHandoffCall(cliId, {
+        toolUseId: "t9",
+        name: "deploy",
+        arguments: {},
+        respond: (r) => answers.push(r),
+      });
+      streamViaCli(
+        model,
+        {
+          messages: [
+            ...ctx1.messages,
+            ourAssistant(doneOf(0).message.content),
+            toolChange(),
+            {
+              role: "toolResult",
+              toolCallId: "t9",
+              toolName: "deploy",
+              content: [{ type: "text", text: "deployed" }],
+            },
+          ],
+        },
+        opts("pi-sys") as any,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(answers[0].content[0]).toEqual({ type: "text", text: "deployed" });
+      expect(spawn).toHaveBeenCalledTimes(1);
+      expect(written(proc).join("")).not.toContain('"interrupt"');
     });
 
     it("falls back to a fresh --resume when the delta is not exactly the awaited tool results", async () => {

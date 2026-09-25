@@ -78,6 +78,14 @@ vi.mock("@earendil-works/pi-ai/providers/all", () => ({
 import spawn from "cross-spawn";
 import { streamViaCli } from "../src/provider";
 import { resetCliProcessesForTests } from "../src/cli-process";
+import { buildSystemPrompt } from "../src/prompt-builder";
+import {
+  PI_087_PROMPT,
+  PI_087_SECTIONS,
+  leadingSystemMessage,
+  sectionPatch,
+  toolChange,
+} from "./fixtures/pi-transcript";
 
 describe("provider registration (default export)", () => {
   it("registers provider with ID pi-claude-cli", async () => {
@@ -2084,6 +2092,156 @@ describe("streamViaCli", () => {
       await vi.advanceTimersByTimeAsync(100);
 
       expect(readMapFile()["pi-sess-4"]).toBeUndefined();
+    });
+
+    describe("pi 0.86+ transcripts: the prompt lives in system messages", () => {
+      // A project dir with its own AGENTS.md, so the legacy build is fully
+      // determined here rather than by whatever sits above the checkout.
+      let projectDir: string;
+      beforeEach(() => {
+        projectDir = fsx.mkdtempSync(pathx.join(os.tmpdir(), "pcc-proj-"));
+        fsx.writeFileSync(
+          pathx.join(projectDir, "AGENTS.md"),
+          "PROJECT-AGENTS-SENTINEL",
+        );
+      });
+      afterEach(() => {
+        fsx.rmSync(projectDir, { recursive: true, force: true });
+      });
+
+      const storePrompt = (cliId: string, prompt: string) => {
+        fsx.mkdirSync(pathx.join(stateDir, "sysprompt"), { recursive: true });
+        fsx.writeFileSync(
+          pathx.join(stateDir, "sysprompt", `${cliId}.txt`),
+          prompt,
+        );
+      };
+      const readStored = (cliId: string) =>
+        fsx.readFileSync(
+          pathx.join(stateDir, "sysprompt", `${cliId}.txt`),
+          "utf-8",
+        );
+      const sentPromptFile = () => {
+        const args = (spawn as any).mock.calls[0][1] as string[];
+        return fsx.readFileSync(
+          args[args.indexOf("--append-system-prompt-file") + 1],
+          "utf-8",
+        );
+      };
+      const sentUserText = () =>
+        JSON.parse(
+          ((spawn as any).mock.results[0].value.stdin.write as any).mock
+            .calls[0][0] as string,
+        ).message.content as string;
+      const resumedTurn = () => ({
+        messages: [
+          leadingSystemMessage(),
+          { role: "user", content: "FIRST" },
+          ourAssistant,
+          { role: "toolResult", toolName: "read", content: "r" },
+          { role: "user", content: "SECOND" },
+        ],
+      });
+
+      it("creates a session with pi's prompt from a context that has only a leading system message", async () => {
+        streamViaCli(
+          mockModels[0] as any,
+          {
+            messages: [
+              leadingSystemMessage(),
+              { role: "user", content: "Hello" },
+            ],
+          },
+          { sessionId: "pi-sess-sys", cwd: projectDir } as any,
+        );
+        await vi.advanceTimersByTimeAsync(0);
+
+        const args = (spawn as any).mock.calls[0][1] as string[];
+        const cliId = args[args.indexOf("--session-id") + 1];
+        const sent = sentPromptFile();
+        expect(sent).toBe(`${PI_087_PROMPT}\n\nPROJECT-AGENTS-SENTINEL`);
+        // Stored as sent, for resumes to replay.
+        expect(readStored(cliId)).toBe(sent);
+        // And the prompt is not history.
+        expect(sentUserText()).toBe("USER:\nHello");
+        await drain();
+      });
+
+      it("repairs a stored prompt that lacks pi's prompt, once, and keeps resuming", async () => {
+        writeMap({ "pi-sess-fix": "cli-sess-fix" });
+        // What the broken build stored: AGENTS.md and the paragraph, no pi.
+        const broken = buildSystemPrompt(
+          { messages: [{ role: "toolResult" }] },
+          projectDir,
+        );
+        expect(broken.startsWith("PROJECT-AGENTS-SENTINEL\n\nIMPORTANT:")).toBe(
+          true,
+        );
+        storePrompt("cli-sess-fix", broken);
+
+        streamViaCli(mockModels[0] as any, resumedTurn(), {
+          sessionId: "pi-sess-fix",
+          cwd: projectDir,
+        } as any);
+        await vi.advanceTimersByTimeAsync(0);
+
+        const args = (spawn as any).mock.calls[0][1] as string[];
+        expect(args[args.indexOf("--resume") + 1]).toBe("cli-sess-fix");
+        const sent = sentPromptFile();
+        expect(sent).toBe(buildSystemPrompt(resumedTurn(), projectDir));
+        expect(sent.startsWith(PI_087_SECTIONS.preamble)).toBe(true);
+        // The repaired bytes are what later turns replay.
+        expect(readStored("cli-sess-fix")).toBe(sent);
+        expect(readMapFile()["pi-sess-fix"]).toBe("cli-sess-fix");
+        expect(sentUserText()).toBe(
+          "TOOL RESULT (historical Read):\nr\nSECOND",
+        );
+        await drain();
+      });
+
+      it("leaves a stored prompt that carries pi's prompt untouched", async () => {
+        writeMap({ "pi-sess-ok": "cli-sess-ok" });
+        const good = `OLDER PI PROMPT\n\nPROJECT-AGENTS-SENTINEL`;
+        storePrompt("cli-sess-ok", good);
+
+        streamViaCli(mockModels[0] as any, resumedTurn(), {
+          sessionId: "pi-sess-ok",
+          cwd: projectDir,
+        } as any);
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect(sentPromptFile()).toBe(good);
+        expect(readStored("cli-sess-ok")).toBe(good);
+        await drain();
+      });
+
+      it("a system message after our last turn neither goes stale nor joins the delta", async () => {
+        writeMap({ "pi-sess-mid": "cli-sess-mid" });
+        storePrompt("cli-sess-mid", "STORED PROMPT");
+
+        streamViaCli(
+          mockModels[0] as any,
+          {
+            messages: [
+              leadingSystemMessage(),
+              { role: "user", content: "FIRST" },
+              ourAssistant,
+              sectionPatch({ cwd: "<cwd>\nSYSTEM-DELTA-SENTINEL\n</cwd>" }),
+              toolChange(),
+              { role: "user", content: "SECOND" },
+            ],
+          },
+          { sessionId: "pi-sess-mid", cwd: projectDir } as any,
+        );
+        await vi.advanceTimersByTimeAsync(0);
+
+        const args = (spawn as any).mock.calls[0][1] as string[];
+        expect(args[args.indexOf("--resume") + 1]).toBe("cli-sess-mid");
+        expect(sentUserText()).toBe("SECOND");
+        // Resume replays the stored prompt; the update is not spliced in.
+        expect(sentPromptFile()).toBe("STORED PROMPT");
+        await drain();
+      });
     });
   });
 

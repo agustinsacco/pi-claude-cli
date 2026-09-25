@@ -14,7 +14,9 @@ import { homedir } from "node:os";
 import {
   alignPiContext,
   usesPiContext,
+  isPolicyOnlyPrompt,
   ContextPolicyError,
+  PI_CONTEXT_MARKER,
 } from "./context-policy.js";
 import {
   DEFAULT_SYSTEM_PROMPT_MODE,
@@ -121,6 +123,24 @@ function contentHasImages(content: string | any[]): boolean {
 }
 
 /**
+ * pi 0.86+ carries its system prompt as `role: "system"` messages inside
+ * `messages` (see {@link resolveSystemPrompt}). They are prompt, not
+ * conversation: they never become a USER/ASSISTANT/TOOL RESULT entry, never
+ * count as the delta a resumed turn sends, and never move the last-assistant
+ * anchor.
+ */
+export function isSystemMessage(message: any): boolean {
+  return message?.role === "system";
+}
+
+/** `messages` with every system message removed; the conversation proper. */
+export function withoutSystemMessages(messages: any[] | undefined): any[] {
+  return Array.isArray(messages)
+    ? messages.filter((m) => !isSystemMessage(m))
+    : [];
+}
+
+/**
  * Check if the conversation ends with a custom tool result.
  * If so, build a simplified prompt that presents the result directly
  * instead of replaying the full conversation history with tool labels.
@@ -169,7 +189,9 @@ function buildCustomToolResultPrompt(messages: any[]): string | null {
 export function buildResumePrompt(context: {
   messages: any[];
 }): string | AnthropicContentBlock[] {
-  const messages = context.messages;
+  // System messages are dropped, not rendered into the user turn: the resumed
+  // CLI session keeps the prompt it was spawned with (see resolveSystemPrompt).
+  const messages = withoutSystemMessages(context.messages);
   if (messages.length === 0) return "";
 
   let lastAssistantIdx = -1;
@@ -221,9 +243,14 @@ export function buildPrompt(context: {
   // Reset placeholder counter for each call
   placeholderImageCount = 0;
 
+  // The system prompt travels as the spawn's prompt file, never as history.
+  // Filtering first also keeps the index arithmetic below (final user
+  // message, custom-tool lookback) about the conversation alone.
+  const messages = withoutSystemMessages(context.messages);
+
   // Special case: when conversation ends with a custom tool result,
   // present it directly instead of complex history replay
-  const customToolPrompt = buildCustomToolResultPrompt(context.messages);
+  const customToolPrompt = buildCustomToolResultPrompt(messages);
   if (customToolPrompt) {
     // customToolPrompt calls userContentToText which may increment placeholderImageCount
     if (placeholderImageCount > 0) {
@@ -235,11 +262,10 @@ export function buildPrompt(context: {
   }
 
   // Determine if any message has images worth passing through
-  const finalUserIndex = findFinalUserMessageIndex(context.messages);
+  const finalUserIndex = findFinalUserMessageIndex(messages);
   const finalUserHasImages =
-    finalUserIndex >= 0 &&
-    contentHasImages(context.messages[finalUserIndex].content);
-  const anyToolResultHasImages = context.messages.some(
+    finalUserIndex >= 0 && contentHasImages(messages[finalUserIndex].content);
+  const anyToolResultHasImages = messages.some(
     (m: any) => m.role === "toolResult" && toolResultHasImages(m.content),
   );
 
@@ -247,9 +273,9 @@ export function buildPrompt(context: {
     // Build history as text (all messages except the final user message)
     const historyParts: string[] = [];
     const toolResultImageBlocks: AnthropicContentBlock[] = [];
-    for (let i = 0; i < context.messages.length; i++) {
+    for (let i = 0; i < messages.length; i++) {
       if (i === finalUserIndex) continue; // Skip final user message -- handled separately
-      const message = context.messages[i];
+      const message = messages[i];
       if (message.role === "user") {
         historyParts.push("USER:");
         historyParts.push(userContentToText(message.content));
@@ -286,7 +312,7 @@ export function buildPrompt(context: {
     // Build final user message content blocks
     const finalUserContent =
       finalUserIndex >= 0
-        ? buildFinalUserContent(context.messages[finalUserIndex].content)
+        ? buildFinalUserContent(messages[finalUserIndex].content)
         : [];
 
     // Combine: history text + tool result images + final user content blocks
@@ -311,7 +337,7 @@ export function buildPrompt(context: {
   // No images in final user message: standard text-only path
   const parts: string[] = [];
 
-  for (const message of context.messages) {
+  for (const message of messages) {
     if (message.role === "user") {
       parts.push("USER:");
       parts.push(userContentToText(message.content));
@@ -409,40 +435,98 @@ export function rewritePiToolSections(systemPrompt: string): string {
   return kept.join("\n\n");
 }
 
+/** pi-ai's `contentText`: string content as-is, else the text blocks joined. */
+function systemContentText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((block) => block?.type === "text")
+    .map((block) => block.text)
+    .join("\n");
+}
+
 /**
- * Builds the system prompt from the context's systemPrompt field,
- * appending AGENTS.md content if found (walking up from cwd, then global fallback).
- * Sanitizes .pi references to .claude for Claude Code compatibility.
+ * The system prompt pi means for this request, as text.
  *
- * In `pi` mode the caller passes the prompt to `--system-prompt-file`,
- * replacing Claude Code's own, so pi's tool sections are rewritten into Claude
- * Code's names first. In `claude` mode the prompt is appended to Claude
- * Code's (`--append-system-prompt-file`) and pi's wording is left exactly as
- * pi wrote it.
+ * pi ≤0.85 sent it as `Context.systemPrompt`. pi 0.86+ sends a transcript
+ * instead: pi-ai's `normalizeContext` folds `systemPrompt` into a leading
+ * `role: "system"` message, and pi-coding-agent writes its prompt as named
+ * `sections` on system messages, patching them later in the conversation.
+ * A provider handed that transcript sees no `systemPrompt` at all.
+ *
+ * This mirrors pi-ai 0.87.1 exactly, so both shapes resolve to the same text
+ * pi-ai's own providers use: `normalizeContext` (a non-empty `systemPrompt`
+ * becomes the first system message), then `getCurrentSystemPrompt` (replay
+ * every system message: `content` appends with a blank line, `sections`
+ * patch by name with `null` deleting, and the result renders as content
+ * followed by the section texts, empty parts dropped). A legacy context with
+ * only `systemPrompt` therefore yields that string byte for byte.
+ *
+ * Replaying all of them, not just the leading one, is what pi-ai does for
+ * every model that cannot take system messages mid-conversation
+ * (`collapseSystemMessages`), and the CLI is such a transport: stream-json
+ * input has no system role. It is also required, not optional: a session
+ * started before pi 0.86 has no leading system message, and its first
+ * request declares the whole prompt in a later one.
+ *
+ * Deliberate differences from pi-ai:
+ * - Tools are not rendered. pi-ai keeps `toolsAdded`/`toolsRemoved` out of
+ *   the prompt text too (they become API tool params), and here the CLI's
+ *   tools are its own natives plus pi's custom tools via the MCP schema
+ *   server, so a text listing would only duplicate or contradict them.
+ * - pi-ai reports no prompt when no system message carries a `timestamp`;
+ *   this ignores timestamps, so a malformed message degrades to its text
+ *   rather than to the empty prompt this function exists to prevent.
+ * - Non-string section values are skipped instead of crashing.
  */
-export function buildSystemPrompt(
-  context: { systemPrompt?: string; messages: any[] },
-  cwd: string,
-  mode: SystemPromptMode = DEFAULT_SYSTEM_PROMPT_MODE,
-): string {
-  if (usesPiContext()) {
-    if (mode !== "claude") {
-      throw new ContextPolicyError(
-        "PI_CLAUDE_CLI_CONTEXT=pi requires the default claude system-prompt mode.",
-      );
-    }
-    // pi already loaded project files and skills. No second AGENTS discovery,
-    // path sanitization, or history-dependent instructions in this policy.
-    return alignPiContext(context.systemPrompt ?? "");
+export function resolveSystemPrompt(context: {
+  systemPrompt?: string;
+  messages?: any[];
+}): string {
+  const systemMessages: any[] = Array.isArray(context.messages)
+    ? context.messages.filter(isSystemMessage)
+    : [];
+  if (
+    typeof context.systemPrompt === "string" &&
+    context.systemPrompt.length > 0
+  ) {
+    systemMessages.unshift({ role: "system", content: context.systemPrompt });
   }
+
+  const content: string[] = [];
+  const sections = new Map<string, string>();
+  for (const message of systemMessages) {
+    const text = systemContentText(message.content);
+    if (text.length > 0) content.push(text);
+    const patch = message.sections;
+    if (!patch || typeof patch !== "object") continue;
+    for (const [name, value] of Object.entries(patch)) {
+      if (value === null) sections.delete(name);
+      else if (typeof value === "string") sections.set(name, value);
+    }
+  }
+  // Through a plain object, as pi-ai does, so key order matches it exactly.
+  const sectionTexts = Object.values(Object.fromEntries(sections));
+  return [content.join("\n\n"), ...sectionTexts]
+    .filter((part) => part.length > 0)
+    .join("\n\n");
+}
+
+const TOOL_RESULTS_INSTRUCTION =
+  "IMPORTANT: The conversation history below contains tool results from previously executed tools. " +
+  "Use these results to answer the user's question. Do NOT attempt to re-call tools that already have results.";
+
+/** The legacy loader's prompt around an already-resolved pi prompt. */
+function buildLegacySystemPrompt(
+  piPrompt: string,
+  cwd: string,
+  mode: SystemPromptMode,
+  hasToolResults: boolean,
+): string {
   const parts: string[] = [];
 
-  if (context.systemPrompt) {
-    parts.push(
-      mode === "pi"
-        ? rewritePiToolSections(context.systemPrompt)
-        : context.systemPrompt,
-    );
+  if (piPrompt) {
+    parts.push(mode === "pi" ? rewritePiToolSections(piPrompt) : piPrompt);
   }
 
   // Look for AGENTS.md
@@ -459,14 +543,102 @@ export function buildSystemPrompt(
 
   // When conversation history has tool results, instruct Claude to use them
   // instead of trying to re-call tools (which may not be available).
-  if (context.messages?.some((m: any) => m.role === "toolResult")) {
-    parts.push(
-      "IMPORTANT: The conversation history below contains tool results from previously executed tools. " +
-        "Use these results to answer the user's question. Do NOT attempt to re-call tools that already have results.",
-    );
-  }
+  if (hasToolResults) parts.push(TOOL_RESULTS_INSTRUCTION);
 
   return parts.join("\n\n");
+}
+
+/**
+ * Builds the system prompt from pi's prompt ({@link resolveSystemPrompt}),
+ * appending AGENTS.md content if found (walking up from cwd, then global fallback).
+ * Sanitizes .pi references to .claude for Claude Code compatibility.
+ *
+ * In `pi` mode the caller passes the prompt to `--system-prompt-file`,
+ * replacing Claude Code's own, so pi's tool sections are rewritten into Claude
+ * Code's names first. In `claude` mode the prompt is appended to Claude
+ * Code's (`--append-system-prompt-file`) and pi's wording is left exactly as
+ * pi wrote it.
+ */
+export function buildSystemPrompt(
+  context: { systemPrompt?: string; messages: any[] },
+  cwd: string,
+  mode: SystemPromptMode = DEFAULT_SYSTEM_PROMPT_MODE,
+): string {
+  const piPrompt = resolveSystemPrompt(context);
+  if (usesPiContext()) {
+    if (mode !== "claude") {
+      throw new ContextPolicyError(
+        "PI_CLAUDE_CLI_CONTEXT=pi requires the default claude system-prompt mode.",
+      );
+    }
+    // pi already loaded project files and skills. No second AGENTS discovery,
+    // path sanitization, or history-dependent instructions in this policy.
+    return alignPiContext(piPrompt);
+  }
+  return buildLegacySystemPrompt(
+    piPrompt,
+    cwd,
+    mode,
+    context.messages?.some((m: any) => m?.role === "toolResult") ?? false,
+  );
+}
+
+/**
+ * Whether a stored prompt is one built while pi's prompt was missing: the
+ * provider's own framing with nothing of pi's inside. Written by every
+ * session created under pi 0.86+ before resolveSystemPrompt existed, when
+ * `buildSystemPrompt` still read the absent `Context.systemPrompt`.
+ *
+ * - pi context: the policy block and nothing after it (this is
+ *   `alignPiContext("")`, and also any earlier policy wording).
+ * - legacy: the tool-results paragraph alone, or exactly what the legacy
+ *   build yields for an empty pi prompt under the current AGENTS.md (AGENTS.md,
+ *   optionally followed by the paragraph). If AGENTS.md changed since, those
+ *   do not match and the prompt is left alone. That errs toward the
+ *   pre-migration behaviour, never toward rewriting a prompt that did carry
+ *   pi's.
+ */
+export function isBrokenStoredPrompt(
+  stored: string,
+  cwd: string,
+  mode: SystemPromptMode = DEFAULT_SYSTEM_PROMPT_MODE,
+): boolean {
+  if (stored.startsWith(PI_CONTEXT_MARKER)) return isPolicyOnlyPrompt(stored);
+  if (stored === TOOL_RESULTS_INSTRUCTION) return true;
+  return [false, true].some(
+    (hasToolResults) =>
+      stored === buildLegacySystemPrompt("", cwd, mode, hasToolResults),
+  );
+}
+
+/**
+ * On resume, the replacement for a broken stored prompt
+ * ({@link isBrokenStoredPrompt}), or undefined to replay the stored one.
+ *
+ * Replaces only when this request carries a real pi prompt, the rebuild
+ * differs, and it keeps the stored prompt's context policy: the policy guard
+ * (`assertContextPolicy`) has already accepted the stored prompt and must go
+ * on accepting whatever replaces it. The cost is one cache miss on the
+ * repairing turn; the CLI does not keep the prompt across `--resume`, so a
+ * different one is valid there, and the repaired bytes are what later turns
+ * replay.
+ */
+export function repairStoredSystemPrompt(
+  stored: string,
+  context: { systemPrompt?: string; messages: any[] },
+  cwd: string,
+  mode: SystemPromptMode = DEFAULT_SYSTEM_PROMPT_MODE,
+): string | undefined {
+  if (!isBrokenStoredPrompt(stored, cwd, mode)) return undefined;
+  if (resolveSystemPrompt(context).trim().length === 0) return undefined;
+  const piContext = stored.startsWith(PI_CONTEXT_MARKER);
+  // The build refuses pi context outside claude mode; resume never built, so
+  // it must not start failing here. Keep the stored prompt.
+  if (piContext && mode !== "claude") return undefined;
+  const rebuilt = buildSystemPrompt(context, cwd, mode);
+  if (rebuilt === stored) return undefined;
+  if (rebuilt.startsWith(PI_CONTEXT_MARKER) !== piContext) return undefined;
+  return rebuilt;
 }
 
 /**

@@ -3,10 +3,16 @@ import {
   alignPiContext,
   assertContextPolicy,
   assertContextCliVersion,
+  isPolicyOnlyPrompt,
   PI_CONTEXT_MARKER,
   usesPiContext,
 } from "../src/context-policy";
 import { buildSystemPrompt } from "../src/prompt-builder";
+import {
+  PI_087_PROMPT,
+  leadingSystemMessage,
+  sectionPatch,
+} from "./fixtures/pi-transcript";
 
 const suffix = `Pi documentation (read only when asked):
 - Main documentation: /home/user/.pi/docs
@@ -148,5 +154,47 @@ describe("pi context with native execution", () => {
     expect(() =>
       assertContextPolicy(`${PI_CONTEXT_MARKER}\npi prompt`, false),
     ).toThrow("fresh pi session");
+  });
+
+  it("wraps pi's prompt from a pi 0.86+ transcript, not an empty one", () => {
+    // pi 0.86+ sends no systemPrompt, only a leading system message. Reading
+    // the absent field yielded alignPiContext(""): the policy block alone.
+    vi.stubEnv("PI_CLAUDE_CLI_CONTEXT", "pi");
+    const built = buildSystemPrompt(
+      { messages: [leadingSystemMessage(), { role: "user", content: "hi" }] },
+      process.cwd(),
+    );
+    expect(built).toBe(alignPiContext(PI_087_PROMPT));
+    expect(isPolicyOnlyPrompt(built)).toBe(false);
+    // The replayed prompt: a later patch is part of it on a fresh build.
+    const patched = buildSystemPrompt(
+      {
+        messages: [
+          leadingSystemMessage(),
+          { role: "user", content: "hi" },
+          sectionPatch({ cwd: "<cwd>\n/elsewhere\n</cwd>" }),
+        ],
+      },
+      process.cwd(),
+    );
+    expect(patched).toContain("<cwd>\n/elsewhere\n</cwd>");
+    expect(patched).not.toContain("<cwd>\n/work/app\n</cwd>");
+  });
+
+  it("recognises a prompt that is the policy block and nothing else", () => {
+    expect(isPolicyOnlyPrompt(alignPiContext(""))).toBe(true);
+    expect(isPolicyOnlyPrompt(`${alignPiContext("")}  \n\t\n`)).toBe(true);
+    // Earlier policy wording counts: only the block boundary is judged.
+    expect(
+      isPolicyOnlyPrompt(
+        `${PI_CONTEXT_MARKER}\nsome older policy line\n</pi_context_policy>\n\n`,
+      ),
+    ).toBe(true);
+    expect(isPolicyOnlyPrompt(alignPiContext("pi prompt"))).toBe(false);
+    expect(isPolicyOnlyPrompt(alignPiContext(PI_087_PROMPT))).toBe(false);
+    expect(isPolicyOnlyPrompt("legacy prompt")).toBe(false);
+    expect(isPolicyOnlyPrompt(`${PI_CONTEXT_MARKER}\nno closing tag`)).toBe(
+      false,
+    );
   });
 });

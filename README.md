@@ -468,6 +468,25 @@ prompt a session was created with is stored in the sidecar
 verbatim rather than rebuilt. A change to the mode therefore takes effect on the
 next new session, not the current one.
 
+> **Unreleased: pi 0.86+.** pi 0.86 stopped passing `systemPrompt` to
+> providers. The prompt now arrives as `role: "system"` messages in the
+> transcript: a leading message with named sections, plus later patches.
+> Until this fix the provider only read the old field. So on pi 0.86+, every
+> new session was created, and its prompt stored, with none of pi's
+> instructions: just the context-policy block, or just AGENTS.md.
+>
+> - The prompt is now assembled from those messages the same way pi-ai does.
+> - System messages are kept out of the transcript sent to the CLI.
+> - A stored prompt that is missing pi's part is rebuilt once, on the next
+>   resume, which costs one cache miss.
+> - A later prompt change (a patched section) takes effect on the next new
+>   CLI session, as a mode change does.
+>
+> pi 0.86+ also restyled its prompt: the tools are in a `<tools>` block, and
+> there is no `Available tools:` heading. So the `pi`-mode tool-section
+> rewrite described above does not currently match, and the prompt passes
+> through unrewritten.
+
 ## Documentation
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — turn lifecycle, the three-way

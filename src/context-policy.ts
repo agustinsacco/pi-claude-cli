@@ -98,6 +98,23 @@ export function alignPiContext(prompt: string): string {
   ].join("\n");
 }
 
+const PI_CONTEXT_CLOSE = "</pi_context_policy>";
+
+/**
+ * A pi-context prompt that is the policy block and nothing else, e.g.
+ * `alignPiContext("")`: pi's own prompt never reached it. Judged by the block
+ * boundary rather than by equality, so a prompt stored under earlier policy
+ * wording counts too. A marker with no closing tag is not recognised.
+ */
+export function isPolicyOnlyPrompt(prompt: string): boolean {
+  if (!prompt.startsWith(PI_CONTEXT_MARKER)) return false;
+  const close = prompt.indexOf(PI_CONTEXT_CLOSE);
+  return (
+    close !== -1 &&
+    prompt.slice(close + PI_CONTEXT_CLOSE.length).trim().length === 0
+  );
+}
+
 /** A policy change cannot safely reuse the CLI's hidden history/pinned prompt. */
 export function assertContextPolicy(
   storedPrompt: string | undefined,
