@@ -115,13 +115,19 @@ describe.skipIf(process.platform === "win32")(
       }
     });
 
-    const turn = (messages: any[], sessionId = piSessionId): Promise<any> =>
+    const turn = (
+      messages: any[],
+      sessionId = piSessionId,
+      // pi 0.86+ passes {} here: its prompt arrives as a system message.
+      extra: { systemPrompt?: string } = {
+        systemPrompt: "PI SYSTEM PROMPT\n\nSecond block.",
+      },
+    ): Promise<any> =>
       new Promise((resolve, reject) => {
-        const stream = streamViaCli(
-          model,
-          { messages, systemPrompt: "PI SYSTEM PROMPT\n\nSecond block." },
-          { sessionId, cwd: ws } as any,
-        );
+        const stream = streamViaCli(model, { messages, ...extra }, {
+          sessionId,
+          cwd: ws,
+        } as any);
         (async () => {
           for await (const ev of stream as any) {
             if (ev.type === "done") return resolve(ev);
@@ -130,6 +136,14 @@ describe.skipIf(process.platform === "win32")(
           reject(new Error("stream ended without done"));
         })().catch(reject);
       });
+
+    const spawnsSoFar = (): { argv: string[]; sysprompt: string | null }[] =>
+      readFileSync(captureFile, "utf-8")
+        .trim()
+        .split("\n")
+        .map((l) => JSON.parse(l))
+        // Drop the --version / `auth status` probes.
+        .filter((s: { argv: string[] }) => s.argv.includes("-p"));
 
     it(
       "re-sends the byte-identical system prompt on the resumed spawn",
@@ -151,13 +165,7 @@ describe.skipIf(process.platform === "win32")(
           { role: "user", content: "second" },
         ]);
 
-        const spawns: { argv: string[]; sysprompt: string | null }[] =
-          readFileSync(captureFile, "utf-8")
-            .trim()
-            .split("\n")
-            .map((l) => JSON.parse(l))
-            // Drop the --version / `auth status` probes.
-            .filter((s: { argv: string[] }) => s.argv.includes("-p"));
+        const spawns = spawnsSoFar();
 
         expect(spawns.length).toBeGreaterThanOrEqual(2);
         const [first, second] = spawns;
@@ -194,12 +202,6 @@ describe.skipIf(process.platform === "win32")(
       { timeout: 60_000 },
       async () => {
         const ephSessionId = `eph-${Date.now()}`;
-        const spawnsSoFar = () =>
-          readFileSync(captureFile, "utf-8")
-            .trim()
-            .split("\n")
-            .map((l) => JSON.parse(l))
-            .filter((s: { argv: string[] }) => s.argv.includes("-p"));
         const before = spawnsSoFar().length;
 
         process.env.PI_CLAUDE_CLI_EPHEMERAL = "1";
@@ -232,8 +234,7 @@ describe.skipIf(process.platform === "win32")(
           delete process.env.PI_CLAUDE_CLI_KEEPALIVE_MS;
         }
 
-        const spawns: { argv: string[]; sysprompt: string | null }[] =
-          spawnsSoFar().slice(before);
+        const spawns = spawnsSoFar().slice(before);
         expect(spawns).toHaveLength(2);
         const ids: string[] = [];
         for (const { argv, sysprompt } of spawns) {
@@ -255,6 +256,27 @@ describe.skipIf(process.platform === "win32")(
             false,
           );
         }
+      },
+    );
+
+    it(
+      "takes pi's prompt from system messages when systemPrompt is empty",
+      { timeout: 60_000 },
+      async () => {
+        // pi 0.86+ sends the prompt as a system message. A provider reading
+        // only the top-level field runs on Claude Code's prompt alone.
+        const before = spawnsSoFar().length;
+        await turn(
+          [
+            { role: "system", content: "PI TRANSCRIPT PROMPT", timestamp: 0 },
+            { role: "user", content: "first" },
+          ],
+          `transcript-${Date.now()}`,
+          {},
+        );
+        const [spawn] = spawnsSoFar().slice(before);
+        expect(spawn.argv).toContain("--append-system-prompt-file");
+        expect(spawn.sysprompt).toContain("PI TRANSCRIPT PROMPT");
       },
     );
   },

@@ -65,7 +65,10 @@ images earlier in history degrade to placeholder text. pi's system prompt
 rides in through `--append-system-prompt-file` (a temp file path — the
 unsuffixed `--append-system-prompt` takes a literal string, and handing it a
 path silently makes the path itself the prompt; also avoids Windows
-`ENAMETOOLONG`).
+`ENAMETOOLONG`). pi 0.86+ leaves `Context.systemPrompt` empty and sends the
+prompt as `system` messages; this path resolves it the same way the default
+does ([CONTEXT-POLICY.md](CONTEXT-POLICY.md#request-contract)) and leaves
+those messages out of the transcript.
 
 ### Spawn
 

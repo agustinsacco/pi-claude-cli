@@ -352,7 +352,9 @@ export function streamViaCli(
 ): AssistantMessageEventStream {
   const stream = createAssistantMessageEventStream();
   const piOwned = usesPiContext();
-  if (piOwned) context = normalizePiContext(context);
+  // pi 0.86+ sends its prompt and tools as system messages and leaves
+  // systemPrompt empty. Both policies read the current ones from there.
+  context = normalizePiContext(context);
   function failPiRequest(error: string, reason: "error" | "aborted" = "error") {
     const message = createEventBridge(stream, model).getOutput();
     stream.push({
