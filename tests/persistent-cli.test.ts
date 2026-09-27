@@ -62,7 +62,6 @@ import {
 import type { HandoffResult } from "../src/handoff-broker";
 import { resetMcpConfigCache } from "../src/mcp-config";
 import { getSystemPrompt } from "../src/session-map";
-import { PI_CONTEXT_MARKER } from "../src/context-policy";
 
 const model = {
   id: "claude-opus-5",
@@ -179,8 +178,8 @@ describe("persistent CLI process", () => {
       await vi.advanceTimersByTimeAsync(0);
       const proc = procAt(0);
       const saved = getSystemPrompt(cliIdOf(0));
-      expect(saved).toContain(PI_CONTEXT_MARKER);
-      expect(saved).toContain("PI-PROJECT-SENTINEL");
+      expect(saved).toBeUndefined();
+      expect(spawnArgs(0)).toContain("--no-session-persistence");
       proc.stdout.write(
         startCycle({ input_tokens: 1 }) +
           text("one") +
@@ -210,7 +209,7 @@ describe("persistent CLI process", () => {
       expect(doneOf(1).message.stopReason).toBe("stop");
     });
 
-    it("refuses a legacy-to-pi policy change as a valid error message, not a raw string", async () => {
+    it("reimports legacy history without a manual reset or resuming the old ledger", async () => {
       const ctx = {
         systemPrompt: "LEGACY",
         messages: [{ role: "user", content: "first" }],
@@ -237,16 +236,123 @@ describe("persistent CLI process", () => {
         },
         opts("pi-old") as any,
       );
-      await vi.advanceTimersByTimeAsync(0);
-      expect(spawn).toHaveBeenCalledTimes(1);
-      expect(doneOf(1).message.stopReason).toBe("error");
-      expect(doneOf(1).message.errorMessage).toContain("fresh pi session");
-      expect(Array.isArray(doneOf(1).message.content)).toBe(true);
+      await vi.advanceTimersByTimeAsync(600);
+      expect(spawn).toHaveBeenCalledTimes(2);
+      expect(spawnArgs(1)).not.toContain("--resume");
+      expect(written(procAt(1)).join("")).toContain("second");
+      expect(written(procAt(1)).join("")).toContain("one");
+      expect(getSystemPrompt(cliIdOf(0))).toBeUndefined();
+      procAt(1).stdout.write(
+        startCycle({ input_tokens: 1 }) +
+          text("two") +
+          endCycle("end_turn") +
+          result(),
+      );
+      await vi.advanceTimersByTimeAsync(10);
+      expect(doneOf(1).message.stopReason).toBe("stop");
     });
+  });
+
+  describe("default pi ownership", () => {
+    it("returns a structured abort before spawning", () => {
+      delete process.env.PI_CLAUDE_CLI_CONTEXT;
+      const controller = new AbortController();
+      controller.abort();
+      streamViaCli(model, { messages: [] }, { signal: controller.signal });
+      expect(spawn).not.toHaveBeenCalled();
+      expect(MockStream.mock.instances[0]._events[0].error.stopReason).toBe(
+        "aborted",
+      );
+    });
+
+    it("surfaces the CLI error as an assistant error for pi retry/compaction", async () => {
+      delete process.env.PI_CLAUDE_CLI_CONTEXT;
+      streamViaCli(
+        model,
+        { messages: [{ role: "user", content: "go" }] },
+        opts("error") as any,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      procAt(0).stdout.write(
+        result({ is_error: true, result: "prompt is too long" }),
+      );
+      await vi.advanceTimersByTimeAsync(10);
+      const event = MockStream.mock.instances[0]._events.find(
+        (e: any) => e.type === "error",
+      );
+      expect(event.error.stopReason).toBe("error");
+      expect(event.error.errorMessage).toBe("prompt is too long");
+      expect(parkedCliProcessCount()).toBe(0);
+    });
+    it.each(["native-turn", "branch", "compaction", "prompt"])(
+      "reimports pi context after %s without stale history",
+      async (change) => {
+        delete process.env.PI_CLAUDE_CLI_CONTEXT;
+        const ctx = {
+          systemPrompt: "old rules",
+          messages: [{ role: "user", content: "original" }],
+        };
+        streamViaCli(model, ctx, opts("owned") as any);
+        await vi.advanceTimersByTimeAsync(0);
+        procAt(0).stdout.write(
+          startCycle({ input_tokens: 1 }) +
+            text("one") +
+            endCycle("end_turn") +
+            result(),
+        );
+        await vi.advanceTimersByTimeAsync(10);
+        const messages: any[] = [
+          ...ctx.messages,
+          ourAssistant(doneOf(0).message.content),
+        ];
+        if (change === "native-turn")
+          messages.push(
+            { role: "user", content: "native question" },
+            {
+              role: "assistant",
+              provider: "openai",
+              content: [{ type: "text", text: "NATIVE FINDING" }],
+            },
+          );
+        if (change === "branch")
+          messages[0] = { role: "user", content: "edited root" };
+        if (change === "compaction")
+          messages.splice(0, 1, { role: "user", content: "compact summary" });
+        messages.push({ role: "user", content: "follow-up" });
+        streamViaCli(
+          model,
+          {
+            systemPrompt: change === "prompt" ? "new rules" : ctx.systemPrompt,
+            messages,
+          },
+          opts("owned") as any,
+        );
+        await vi.advanceTimersByTimeAsync(600);
+        expect(spawn).toHaveBeenCalledTimes(2);
+        expect(procAt(0).stdin.end).toHaveBeenCalled();
+        expect(spawnArgs(1)).not.toContain("--resume");
+        const replay = written(procAt(1)).join("");
+        expect(replay).toContain("follow-up");
+        if (change === "native-turn")
+          expect(replay).toContain("NATIVE FINDING");
+        if (change === "branch" || change === "compaction")
+          expect(replay).not.toContain("original");
+        procAt(1).stdout.write(
+          startCycle({ input_tokens: 1 }) +
+            text("two") +
+            endCycle("end_turn") +
+            result(),
+        );
+        await vi.advanceTimersByTimeAsync(10);
+        expect(doneOf(1).message.stopReason).toBe("stop");
+        expect(getSystemPrompt(cliIdOf(1))).toBeUndefined();
+      },
+    );
   });
 
   describe("proxied handoff", () => {
     it("hands the tool to pi WITHOUT interrupting, then answers the CLI's tools/call from the next pi call on the same process", async () => {
+      delete process.env.PI_CLAUDE_CLI_CONTEXT;
       const ctx1 = { messages: [{ role: "user", content: "search please" }] };
       streamViaCli(model, ctx1, opts("pi-A") as any);
       await vi.advanceTimersByTimeAsync(0);

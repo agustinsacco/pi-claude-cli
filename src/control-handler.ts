@@ -13,6 +13,7 @@
 
 import type { ClaudeControlRequest } from "./types";
 import { CUSTOM_TOOLS_MCP_PREFIX } from "./tool-mapping.js";
+import { usesPiContext } from "./context-policy.js";
 
 export const TOOL_EXECUTION_DENIED_MESSAGE =
   "Tool execution is unavailable in this environment.";
@@ -61,7 +62,7 @@ export function handleControlRequest(
 
   const toolName = msg.request?.tool_name ?? "";
   const isCustomTool = toolName.startsWith(CUSTOM_TOOLS_MCP_PREFIX);
-  const deny = isCustomTool && !options?.allowHandoff;
+  const deny = isCustomTool ? !options?.allowHandoff : usesPiContext();
 
   const response: ControlResponse = {
     type: "control_response",

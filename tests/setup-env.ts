@@ -13,6 +13,14 @@
  * Tests that need a knob set it themselves (and restore it), so clearing the
  * environment here can only remove ambient state.
  */
+import { beforeEach } from "vitest";
+
+// Existing observer-mode fixtures exercise the explicitly supported legacy path.
+// Pi-owned suites unset this in their own beforeEach to test the real default.
+beforeEach(() => {
+  process.env.PI_CLAUDE_CLI_CONTEXT = "legacy";
+});
+
 for (const key of Object.keys(process.env)) {
   if (key.startsWith("PI_CLAUDE_CLI_")) delete process.env[key];
 }

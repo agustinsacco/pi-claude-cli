@@ -830,6 +830,50 @@ describe("hermetic mode (issue #5)", () => {
   });
 });
 
+describe("ephemeral mode (PI_CLAUDE_CLI_EPHEMERAL)", () => {
+  const originalEnv = process.env.PI_CLAUDE_CLI_EPHEMERAL;
+
+  afterEach(() => {
+    if (originalEnv === undefined) delete process.env.PI_CLAUDE_CLI_EPHEMERAL;
+    else process.env.PI_CLAUDE_CLI_EPHEMERAL = originalEnv;
+  });
+
+  it.each(["1", "true", "YES"])(
+    "adds --no-session-persistence when set to %s",
+    (value) => {
+      process.env.PI_CLAUDE_CLI_EPHEMERAL = value;
+      spawnClaude("claude-haiku-4-5", undefined, {});
+      const args = (spawn as any).mock.calls.at(-1)[1] as string[];
+      expect(args.filter((a) => a === "--no-session-persistence")).toHaveLength(
+        1,
+      );
+    },
+  );
+
+  it("keeps --session-id alongside it, so the spawn stays keyed", () => {
+    // The id still names the staged prompt file and the MCP config; the CLI
+    // honours it without writing a transcript (verified on 2.1.280).
+    process.env.PI_CLAUDE_CLI_EPHEMERAL = "1";
+    spawnClaude("claude-haiku-4-5", undefined, { newSessionId: "eph-1" });
+    const args = (spawn as any).mock.calls.at(-1)[1] as string[];
+    expect(args[args.indexOf("--session-id") + 1]).toBe("eph-1");
+    expect(args).toContain("--no-session-persistence");
+    expect(args).not.toContain("--resume");
+  });
+
+  it("stays off when unset or falsy: the default argv is unchanged", () => {
+    delete process.env.PI_CLAUDE_CLI_EPHEMERAL;
+    spawnClaude("claude-haiku-4-5", undefined, { newSessionId: "s-1" });
+    const unset = (spawn as any).mock.calls.at(-1)[1] as string[];
+    expect(unset).not.toContain("--no-session-persistence");
+
+    process.env.PI_CLAUDE_CLI_EPHEMERAL = "0";
+    spawnClaude("claude-haiku-4-5", undefined, { newSessionId: "s-1" });
+    const falsy = (spawn as any).mock.calls.at(-1)[1] as string[];
+    expect(falsy).toEqual(unset);
+  });
+});
+
 describe("auto-compact window (PI_CLAUDE_CLI_AUTOCOMPACT)", () => {
   const originalEnv = process.env.PI_CLAUDE_CLI_AUTOCOMPACT;
 

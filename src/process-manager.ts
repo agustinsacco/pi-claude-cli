@@ -21,6 +21,7 @@ import {
   ContextPolicyError,
   assertContextCliVersion,
 } from "./context-policy.js";
+import { envFlag, isEphemeral } from "./env-flag.js";
 
 /**
  * Spawn a Claude CLI subprocess with all required flags for stream-json communication.
@@ -33,12 +34,6 @@ import {
  * @param options - Optional cwd, AbortSignal, effort level and prompt mode
  * @returns The spawned ChildProcess with piped stdin/stdout/stderr
  */
-/** Truthy env opt-in: "1", "true" or "yes", case-insensitive. */
-function envFlag(name: string): boolean {
-  const value = (process.env[name] ?? "").toLowerCase();
-  return value === "1" || value === "true" || value === "yes";
-}
-
 /** Truthy PI_CLAUDE_CLI_HERMETIC opts in to hermetic mode (see README). */
 function isHermetic(): boolean {
   return envFlag("PI_CLAUDE_CLI_HERMETIC");
@@ -96,11 +91,6 @@ export function spawnClaude(
       "Unset CLAUDE_CODE_SIMPLE/CLAUDE_CODE_SAFE_MODE: pi context requires subscription authentication and the explicit MCP bridge.",
     );
   }
-  if (piContext && options?.systemPromptMode === "pi") {
-    throw new ContextPolicyError(
-      "PI_CLAUDE_CLI_CONTEXT=pi retains Claude Code's default system prompt.",
-    );
-  }
   const args = [
     "-p",
     "--input-format",
@@ -146,10 +136,10 @@ export function spawnClaude(
     args.push("--setting-sources", "");
   }
   if (piContext) {
-    args.push("--disable-slash-commands", "--no-chrome");
+    args.push("--disable-slash-commands", "--no-chrome", "--tools", "");
   }
 
-  if (options?.resumeSessionId) {
+  if (!piContext && options?.resumeSessionId) {
     // Resume an existing session — CLI loads prior conversation from disk
     args.push("--resume", options.resumeSessionId);
   } else if (options?.newSessionId) {
@@ -157,7 +147,22 @@ export function spawnClaude(
     args.push("--session-id", options.newSessionId);
   }
 
-  if (systemPrompt) {
+  // Nothing the CLI would write here is ever read back, for one of two
+  // reasons. Under pi context the process is a disposable cache of pi's
+  // history and is never resumed. PI_CLAUDE_CLI_EPHEMERAL (src/env-flag.ts)
+  // marks a legacy one-shot with no next turn, so its transcript under
+  // ~/.claude/projects would be pure disk debris (~60 KB per call).
+  // --session-id stays: the id still keys this spawn's staged prompt and MCP
+  // config, and the CLI honours it without writing anything. Verified on
+  // claude 2.1.280 with exactly this flag set (stream-json + --session-id): no
+  // transcript written, the result envelope carried the requested session_id.
+  // A legacy pi session that only ever runs ephemeral never reaches --resume
+  // either: session-map.ts records no pairing for it to resume from.
+  if (piContext || isEphemeral()) {
+    args.push("--no-session-persistence");
+  }
+
+  if (systemPrompt || piContext) {
     // Write the system prompt to a temp file and pass the FILE flags.
     //
     // `--system-prompt` / `--append-system-prompt` take a literal string, NOT
@@ -176,13 +181,15 @@ export function spawnClaude(
     const tmpFile = systemPromptFilePath(
       options?.resumeSessionId ?? options?.newSessionId,
     );
-    writeFileSync(tmpFile, systemPrompt, {
+    writeFileSync(tmpFile, systemPrompt ?? "", {
       encoding: "utf-8",
       mode: RUNTIME_FILE_MODE,
     });
     // `pi` mode replaces Claude Code's prompt outright; `claude` mode layers
     // pi's on top of it. See src/system-prompt-mode.ts for the trade-off.
-    const mode = options?.systemPromptMode ?? DEFAULT_SYSTEM_PROMPT_MODE;
+    const mode = piContext
+      ? "pi"
+      : (options?.systemPromptMode ?? DEFAULT_SYSTEM_PROMPT_MODE);
     args.push(
       mode === "pi" ? "--system-prompt-file" : "--append-system-prompt-file",
       tmpFile,
@@ -211,7 +218,7 @@ export function spawnClaude(
   // a host can change the setting without restarting pi; the flag is
   // config, not context, so changing it never invalidates the prompt cache.
   const autocompact = resolveAutocompact();
-  if (autocompact !== undefined) {
+  if (!piContext && autocompact !== undefined) {
     args.push("--autocompact", autocompact);
   }
 
@@ -229,6 +236,9 @@ export function spawnClaude(
       CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1",
       CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
       ENABLE_CLAUDEAI_MCP_SERVERS: "false",
+      DISABLE_AUTO_COMPACT: "1",
+      DISABLE_COMPACT: "1",
+      ENABLE_TOOL_SEARCH: "false",
     });
   }
   if (!env.MCP_TOOL_TIMEOUT)

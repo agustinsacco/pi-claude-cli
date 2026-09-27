@@ -1,6 +1,13 @@
-# Architecture
+# Legacy observer architecture
 
-How this extension turns the Claude Code CLI into a pi model provider, what
+This document describes the explicit `PI_CLAUDE_CLI_CONTEXT=legacy` compatibility
+path and the marker contracts needed to render old sessions. The default from
+0.9.0 uses [pi-owned context and execution](CONTEXT-POLICY.md): all tools run in
+pi, CLI sessions are disposable and pi owns compaction. The lifecycle/bridge
+code is shared, but the native execution, saved pairing and CLI compaction
+sections below do not describe the default.
+
+How the legacy path turns the Claude Code CLI into a pi model provider, what
 crosses the boundary in each direction, and why each non-obvious decision is
 the way it is.
 
@@ -13,8 +20,7 @@ agent: it owns native tools, its default prompt, and a separate transcript
 and compaction lifecycle. pi executes custom handoff tools and remains the
 front-end's system of record.
 
-The opt-in [pi context policy](CONTEXT-POLICY.md) (0.7.1+) consolidates project,
-skill and integration discovery without replacing that native execution model.
+The [default context policy](CONTEXT-POLICY.md) replaces this execution model.
 
 Registration happens twice in `index.ts`, because pi 0.84 has two dispatch
 paths:
@@ -59,7 +65,10 @@ images earlier in history degrade to placeholder text. pi's system prompt
 rides in through `--append-system-prompt-file` (a temp file path — the
 unsuffixed `--append-system-prompt` takes a literal string, and handing it a
 path silently makes the path itself the prompt; also avoids Windows
-`ENAMETOOLONG`).
+`ENAMETOOLONG`). pi 0.86+ leaves `Context.systemPrompt` empty and sends the
+prompt as `system` messages; this path resolves it the same way the default
+does ([CONTEXT-POLICY.md](CONTEXT-POLICY.md#request-contract)) and leaves
+those messages out of the transcript.
 
 ### Spawn
 
@@ -555,6 +564,11 @@ the model's working memory. The sidecar map
 overrides; `src/session-map.ts`) links pi session id → CLI session id, and
 `sysprompt/<cliId>.txt` beside it holds the system prompt that session was
 created with.
+
+`PI_CLAUDE_CLI_EPHEMERAL=1` opts a one-shot out of all of it: the CLI runs with
+`--no-session-persistence` and neither the pairing nor the prompt is recorded,
+so every respawn in that pi session is a create/import and none is a resume.
+Reuse of a parked process is unaffected — it needs no pairing.
 
 - **Resume:** mapping present and not stale → `--resume <cliId>` with a
   **delta** prompt (only what follows the last assistant turn), plus the

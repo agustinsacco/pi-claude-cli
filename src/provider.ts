@@ -80,6 +80,11 @@ import {
 import type { HandoffResult } from "./handoff-broker.js";
 import { handoffSecretFile } from "./handoff-broker.js";
 import { randomUUID } from "node:crypto";
+import {
+  piContext as normalizePiContext,
+  historyHash,
+  replayPiMessages,
+} from "./pi-context.js";
 
 /**
  * Inactivity timeout. CLI-side tool executions (web search, user MCP
@@ -342,10 +347,27 @@ function bridgeUsage4(output: any): Usage4 {
  */
 export function streamViaCli(
   model: Model<any>,
-  context: { messages: any[]; systemPrompt?: string },
+  context: { messages: any[]; systemPrompt?: string; tools?: any[] },
   options?: StreamViaCLiOptions,
 ): AssistantMessageEventStream {
   const stream = createAssistantMessageEventStream();
+  const piOwned = usesPiContext();
+  // pi 0.86+ sends its prompt and tools as system messages and leaves
+  // systemPrompt empty. Both policies read the current ones from there.
+  context = normalizePiContext(context);
+  function failPiRequest(error: string, reason: "error" | "aborted" = "error") {
+    const message = createEventBridge(stream, model).getOutput();
+    stream.push({
+      type: "error",
+      reason,
+      error: { ...message, stopReason: reason, errorMessage: error },
+    } as any);
+    stream.end();
+  }
+  if (piOwned && options?.signal?.aborted) {
+    failPiRequest("Request aborted", "aborted");
+    return stream;
+  }
 
   /**
    * One attempt. Returns "resume-miss" (without touching the stream) when the
@@ -375,6 +397,13 @@ export function streamViaCli(
 
     try {
       const cwd = options?.cwd ?? process.cwd();
+      if (piOwned && piSessionId) {
+        const oldId = getCliSession(piSessionId);
+        if (oldId) {
+          clearCliSession(piSessionId);
+          clearSystemPrompt(oldId);
+        }
+      }
       const messages = context.messages as any[];
       const stale = cliSessionIsStale(messages);
       const delta = deltaMessages(messages);
@@ -383,14 +412,13 @@ export function streamViaCli(
         model.id,
         options?.thinkingBudgets,
       );
-      const systemPromptMode = resolveSystemPromptMode();
+      const systemPromptMode = piOwned ? "pi" : resolveSystemPromptMode();
       const piContext = usesPiContext();
       // Never attach a new context policy to a transcript that still carries
       // the other loader's instructions. Leave that session available under
       // its original policy; the host/user must start a fresh pi session.
-      const mappedContextId = piSessionId
-        ? getCliSession(piSessionId)
-        : undefined;
+      const mappedContextId =
+        !piOwned && piSessionId ? getCliSession(piSessionId) : undefined;
       if (mappedContextId && !stale && !forceFullReplay) {
         assertContextPolicy(getSystemPrompt(mappedContextId), piContext);
       }
@@ -406,6 +434,7 @@ export function streamViaCli(
         effort ?? null,
         systemPromptMode,
         piContext,
+        piOwned ? context.systemPrompt : null,
         cwd,
         options?.mcpConfigPath ?? null,
         options?.mcpConfig?.schemaPath ?? null,
@@ -422,7 +451,19 @@ export function streamViaCli(
         ? takeParkedCliProcess(piSessionId)
         : undefined;
       if (parkedCli) {
-        if (!forceFullReplay && !stale && parkedCli.signature === signature) {
+        const checkpoint = parkedCli.piHistory;
+        const historyMatches =
+          !piOwned ||
+          (!!checkpoint &&
+            messages.length >= checkpoint.length &&
+            historyHash(messages.slice(0, checkpoint.length)) ===
+              checkpoint.hash);
+        if (
+          !forceFullReplay &&
+          !stale &&
+          historyMatches &&
+          parkedCli.signature === signature
+        ) {
           const toolResults = delta.filter((m) => m?.role === "toolResult");
           const userMessages = delta.filter((m) => m?.role === "user");
           if (parkedCli.turnActive) {
@@ -457,9 +498,8 @@ export function streamViaCli(
         // pi's history (a foreign-provider turn after our last one means the
         // CLI never saw that exchange). Anything else — first turn, fork,
         // model switch, lost sidecar, resume miss — is one reimport.
-        const mappedCliId = piSessionId
-          ? getCliSession(piSessionId)
-          : undefined;
+        const mappedCliId =
+          !piOwned && piSessionId ? getCliSession(piSessionId) : undefined;
         resumeSessionId =
           !forceFullReplay && mappedCliId && !stale ? mappedCliId : undefined;
         // Fresh sessions get a provider-minted id, never pi's: the CLI refuses
@@ -470,9 +510,11 @@ export function streamViaCli(
 
         // Resume sends only the delta since the last assistant turn (new user
         // text, handoff tool results). Create/import sends the full history.
-        const prompt = resumeSessionId
-          ? buildResumePrompt(context)
-          : buildPrompt(context);
+        const prompt = piOwned
+          ? replayPiMessages(messages)
+          : resumeSessionId
+            ? buildResumePrompt(context)
+            : buildPrompt(context);
         // The CLI does not keep --system-prompt across --resume, so it goes on
         // EVERY spawn. On resume, replay the stored bytes rather than rebuilding
         // them: an identical prompt keeps the cached prefix, a drifted one
@@ -508,10 +550,12 @@ export function streamViaCli(
         });
         // Record the mapping as soon as the session exists on disk. On a turn
         // that later errors, the mapping is cleared so the next turn reimports.
-        if (piSessionId && newCliId) setCliSession(piSessionId, newCliId);
+        if (!piOwned && piSessionId && newCliId)
+          setCliSession(piSessionId, newCliId);
         // Store the created prompt so every later turn re-passes these exact
         // bytes. Without it, resume falls back to a rebuild that can drift.
-        if (newCliId && systemPrompt) setSystemPrompt(newCliId, systemPrompt);
+        if (!piOwned && newCliId && systemPrompt)
+          setSystemPrompt(newCliId, systemPrompt);
         const getStderr = captureStderr(proc);
         // Register in global process registry for teardown cleanup
         registerProcess(proc);
@@ -576,11 +620,23 @@ export function streamViaCli(
             : [{ type: "text" as const, text: `Error: ${errMsg}` }],
           stopReason: "stop" as const,
         };
-        stream.push({
-          type: "done",
-          reason: "stop",
-          message: errorMessage,
-        } as any);
+        stream.push(
+          piOwned
+            ? ({
+                type: "error",
+                reason: aborted ? "aborted" : "error",
+                error: {
+                  ...errorMessage,
+                  stopReason: aborted ? "aborted" : "error",
+                  errorMessage: errMsg,
+                },
+              } as any)
+            : ({
+                type: "done",
+                reason: "stop",
+                message: errorMessage,
+              } as any),
+        );
         stream.end();
         // An episode that failed cannot vouch for the process it was
         // attached to; end it rather than park it for the next call.
@@ -666,6 +722,10 @@ export function streamViaCli(
         abortHandler = () => {
           aborted = true;
           selfInterrupted = true;
+          if (piOwned) {
+            endStreamWithError("Request aborted");
+            return;
+          }
           sendInterrupt(proc);
           const backstop = setTimeout(() => forceKillProcess(proc), 2000);
           proc.once("close", () => clearTimeout(backstop));
@@ -729,7 +789,7 @@ export function streamViaCli(
         },
         onClose(code) {
           if (resumeMiss || finished) return;
-          if (code !== 0 && code !== null) {
+          if (piOwned || (code !== 0 && code !== null)) {
             const stderr = live.getStderr();
             const message = stderr
               ? `Claude CLI exited with code ${code}: ${stderr.trim()}`
@@ -864,6 +924,9 @@ export function streamViaCli(
             if (isError && !selfInterrupted && !aborted) {
               const errMsg =
                 r.error ??
+                (typeof r.result === "string" && r.is_error
+                  ? r.result
+                  : undefined) ??
                 (Array.isArray(r.errors) && r.errors.length > 0
                   ? r.errors.join("; ")
                   : `Claude CLI returned ${r.subtype ?? "non-success result"}`);
@@ -971,7 +1034,9 @@ export function streamViaCli(
           );
         }
       } else if (mode === "turn") {
-        live.writeUser(buildResumePrompt(context));
+        live.writeUser(
+          piOwned ? replayPiMessages(delta) : buildResumePrompt(context),
+        );
       }
 
       await finishedPromise;
@@ -995,6 +1060,13 @@ export function streamViaCli(
             ? "stop"
             : output.stopReason;
 
+        if (piOwned) {
+          const acknowledged = [...messages, output];
+          live.piHistory = {
+            length: acknowledged.length,
+            hash: historyHash(acknowledged),
+          };
+        }
         streamEnded = true;
         stream.push({
           type: "done",
@@ -1031,6 +1103,10 @@ export function streamViaCli(
         await runOnce(true);
       }
     } catch (err: any) {
+      if (piOwned) {
+        failPiRequest(err.message ?? "Unexpected error in streamViaCli");
+        return;
+      }
       if (err instanceof ContextPolicyError) {
         // pi's stream result must be an AssistantMessage, not a raw error
         // string (agent-loop inspects .content even when a call failed).

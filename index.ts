@@ -25,6 +25,8 @@ import { retireAllCliProcesses } from "./src/cli-process.js";
 import { rewriteOverflowMessage } from "./src/overflow.js";
 import { buildRateLimitPayload, rateLimitIdentity } from "./src/rate-limit.js";
 import type { TaskTrackerState } from "./src/types.js";
+import { usesPiContext } from "./src/context-policy.js";
+import { piContext } from "./src/pi-context.js";
 
 // Kill all active Claude subprocesses on process exit to prevent orphans
 process.on("exit", killAllProcesses);
@@ -138,19 +140,17 @@ let mcpSchema: { schemaPath: string; version: number } | undefined;
  */
 function ensureMcpSchema(
   pi: ExtensionAPI,
+  context: Parameters<typeof piContext>[0],
 ): { schemaPath: string; version: number } | undefined {
   try {
-    const allTools = pi.getAllTools();
-
-    // Registry not ready yet — retry on the next call
-    if (!Array.isArray(allTools)) {
-      return mcpSchema;
-    }
-
-    const toolDefs = getCustomToolDefs(pi);
-    if (toolDefs.length === 0) {
-      return mcpSchema;
-    }
+    // The request, not the registry, is authoritative: inactive tools stay inactive.
+    const toolDefs = usesPiContext()
+      ? piContext(context).tools.map((t: any) => ({
+          name: t.name,
+          description: t.description,
+          inputSchema: t.parameters,
+        }))
+      : getCustomToolDefs(pi);
 
     const { schemaPath, changed, version } = writeSchemaFile(toolDefs);
     mcpSchema = { schemaPath, version };
@@ -160,6 +160,7 @@ function ensureMcpSchema(
       );
     }
   } catch (err) {
+    if (usesPiContext()) throw err;
     console.warn(
       "[pi-claude-cli] MCP config generation failed, custom tools unavailable:",
       err,
@@ -211,24 +212,32 @@ export default function (pi: ExtensionAPI) {
       thinkingLevelMap: { xhigh: "xhigh", max: "max" },
     }));
 
-    // Ensure all registered tools are active so pi can execute them.
-    // Some tools (find, grep, ls) are registered but not activated by default.
+    // Never change pi's active tools simply because this provider is installed.
     pi.on("session_start", async (_event: unknown, ctx: unknown) => {
+      await retireAllCliProcesses();
       uiContext = ctx as typeof uiContext;
       lastRateLimitJson = undefined;
       lastSubagentsJson = undefined;
-      const allTools = pi.getAllTools();
-      if (Array.isArray(allTools)) {
-        pi.setActiveTools(allTools.map((t: any) => t.name));
-      }
     });
+
+    const retire = async () => {
+      await retireAllCliProcesses();
+      uiContext?.ui?.setStatus?.(RATE_LIMIT_STATUS_KEY, undefined);
+      uiContext?.ui?.setStatus?.(SUBAGENTS_STATUS_KEY, undefined);
+      lastRateLimitJson = undefined;
+      lastSubagentsJson = undefined;
+    };
+    pi.on("model_select", retire);
+    pi.on("session_shutdown", retire);
+    pi.on("session_tree", retire);
+    pi.on("session_compact", retire);
 
     const streamFn = (
       model: Parameters<typeof streamViaCli>[0],
       context: Parameters<typeof streamViaCli>[1],
       options?: Parameters<typeof streamViaCli>[2],
     ) => {
-      const schema = ensureMcpSchema(pi);
+      const schema = ensureMcpSchema(pi, context);
       // The socket start is async; the provider awaits it inside its own
       // driver so streamSimple still returns the stream synchronously.
       return streamViaCli(model, context, {

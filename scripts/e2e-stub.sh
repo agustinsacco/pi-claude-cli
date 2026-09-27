@@ -39,7 +39,7 @@ fi
 run_pi() {
   # `</dev/null` because print mode still reads stdin: inherit a pipe that
   # never closes (a CI runner, an agent shell) and pi waits on EOF forever.
-  cd "$WORK_DIR" && PATH="$STUB_DIR:$PATH" ${TIMEOUT[@]+"${TIMEOUT[@]}"} \
+  cd "$WORK_DIR" && PI_CLAUDE_CLI_KEEPALIVE_MS=0 PATH="$STUB_DIR:$PATH" ${TIMEOUT[@]+"${TIMEOUT[@]}"} \
     pi -ne -e "$EXT_DIR" -p --model "pi-claude-cli/claude-haiku-4-5" "$1" \
     </dev/null
 }
@@ -58,7 +58,7 @@ fi
 # Background sub-agents must survive the turn's first `result`. The stub emits
 # one there and only reports the agent afterwards, so a provider that kills on
 # it prints LAUNCHED-WAITING and nothing else.
-FAN="$(run_pi "fanout")"
+FAN="$(PI_CLAUDE_CLI_CONTEXT=legacy run_pi "fanout")"
 
 echo "--- fan-out output ---"
 echo "$FAN"

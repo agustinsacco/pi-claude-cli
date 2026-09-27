@@ -28,6 +28,7 @@ import {
   chmodSync,
   rmSync,
   realpathSync,
+  existsSync,
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -114,13 +115,19 @@ describe.skipIf(process.platform === "win32")(
       }
     });
 
-    const turn = (messages: any[]): Promise<any> =>
+    const turn = (
+      messages: any[],
+      sessionId = piSessionId,
+      // pi 0.86+ passes {} here: its prompt arrives as a system message.
+      extra: { systemPrompt?: string } = {
+        systemPrompt: "PI SYSTEM PROMPT\n\nSecond block.",
+      },
+    ): Promise<any> =>
       new Promise((resolve, reject) => {
-        const stream = streamViaCli(
-          model,
-          { messages, systemPrompt: "PI SYSTEM PROMPT\n\nSecond block." },
-          { sessionId: piSessionId, cwd: ws } as any,
-        );
+        const stream = streamViaCli(model, { messages, ...extra }, {
+          sessionId,
+          cwd: ws,
+        } as any);
         (async () => {
           for await (const ev of stream as any) {
             if (ev.type === "done") return resolve(ev);
@@ -129,6 +136,14 @@ describe.skipIf(process.platform === "win32")(
           reject(new Error("stream ended without done"));
         })().catch(reject);
       });
+
+    const spawnsSoFar = (): { argv: string[]; sysprompt: string | null }[] =>
+      readFileSync(captureFile, "utf-8")
+        .trim()
+        .split("\n")
+        .map((l) => JSON.parse(l))
+        // Drop the --version / `auth status` probes.
+        .filter((s: { argv: string[] }) => s.argv.includes("-p"));
 
     it(
       "re-sends the byte-identical system prompt on the resumed spawn",
@@ -150,19 +165,17 @@ describe.skipIf(process.platform === "win32")(
           { role: "user", content: "second" },
         ]);
 
-        const spawns: { argv: string[]; sysprompt: string | null }[] =
-          readFileSync(captureFile, "utf-8")
-            .trim()
-            .split("\n")
-            .map((l) => JSON.parse(l))
-            // Drop the --version / `auth status` probes.
-            .filter((s: { argv: string[] }) => s.argv.includes("-p"));
+        const spawns = spawnsSoFar();
 
         expect(spawns.length).toBeGreaterThanOrEqual(2);
         const [first, second] = spawns;
 
         // Turn 2 resumed rather than reimported.
         expect(second.argv).toContain("--resume");
+        // Persistence is what makes the resume possible; only
+        // PI_CLAUDE_CLI_EPHEMERAL turns it off.
+        expect(first.argv).not.toContain("--no-session-persistence");
+        expect(second.argv).not.toContain("--no-session-persistence");
 
         // Both spawns carry the prompt. Dropping it on resume is the bug.
         expect(first.argv).toContain("--append-system-prompt-file");
@@ -181,6 +194,89 @@ describe.skipIf(process.platform === "win32")(
           a[a.indexOf("--append-system-prompt-file") + 1];
         expect(pathOf(second.argv)).toContain(cliId);
         expect(pathOf(first.argv)).toContain(cliId);
+      },
+    );
+
+    it(
+      "PI_CLAUDE_CLI_EPHEMERAL: no transcript, no sidecar, never --resume",
+      { timeout: 60_000 },
+      async () => {
+        const ephSessionId = `eph-${Date.now()}`;
+        const before = spawnsSoFar().length;
+
+        process.env.PI_CLAUDE_CLI_EPHEMERAL = "1";
+        // Park nothing, so turn 2 cannot continue turn 1's live process and
+        // has to take the spawn path — exactly where a recorded pairing would
+        // turn into --resume. (With the default keepalive a follow-up turn
+        // reuses the parked process in-process; no pairing is needed for that.)
+        process.env.PI_CLAUDE_CLI_KEEPALIVE_MS = "0";
+        try {
+          // Two turns in one pi session.
+          const t1 = await turn(
+            [{ role: "user", content: "first" }],
+            ephSessionId,
+          );
+          await turn(
+            [
+              { role: "user", content: "first" },
+              {
+                role: "assistant",
+                content: t1.message.content,
+                provider: "pi-claude-cli",
+                api: "pi-claude-cli",
+              },
+              { role: "user", content: "second" },
+            ],
+            ephSessionId,
+          );
+        } finally {
+          delete process.env.PI_CLAUDE_CLI_EPHEMERAL;
+          delete process.env.PI_CLAUDE_CLI_KEEPALIVE_MS;
+        }
+
+        const spawns = spawnsSoFar().slice(before);
+        expect(spawns).toHaveLength(2);
+        const ids: string[] = [];
+        for (const { argv, sysprompt } of spawns) {
+          expect(argv).toContain("--no-session-persistence");
+          expect(argv).not.toContain("--resume");
+          ids.push(argv[argv.indexOf("--session-id") + 1]);
+          // Every spawn is a full import, so the prompt is always attached.
+          expect(sysprompt).toContain("PI SYSTEM PROMPT");
+        }
+        // Nothing recorded, so turn 2 is a fresh CLI session, not a resume.
+        expect(ids[0]).not.toBe(ids[1]);
+
+        const map = JSON.parse(
+          readFileSync(join(stateDir, "session-map.json"), "utf-8"),
+        );
+        expect(map[ephSessionId]).toBeUndefined();
+        for (const id of ids) {
+          expect(existsSync(join(stateDir, "sysprompt", `${id}.txt`))).toBe(
+            false,
+          );
+        }
+      },
+    );
+
+    it(
+      "takes pi's prompt from system messages when systemPrompt is empty",
+      { timeout: 60_000 },
+      async () => {
+        // pi 0.86+ sends the prompt as a system message. A provider reading
+        // only the top-level field runs on Claude Code's prompt alone.
+        const before = spawnsSoFar().length;
+        await turn(
+          [
+            { role: "system", content: "PI TRANSCRIPT PROMPT", timestamp: 0 },
+            { role: "user", content: "first" },
+          ],
+          `transcript-${Date.now()}`,
+          {},
+        );
+        const [spawn] = spawnsSoFar().slice(before);
+        expect(spawn.argv).toContain("--append-system-prompt-file");
+        expect(spawn.sysprompt).toContain("PI TRANSCRIPT PROMPT");
       },
     );
   },

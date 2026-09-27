@@ -1,115 +1,52 @@
-# Pi context, native Claude tools
+# Pi-owned context and execution
 
-`PI_CLAUDE_CLI_CONTEXT=pi` (0.7.1+) is an opt-in **context-loading policy**,
-not a new execution mode. It retains Claude Code's default prompt, native
-Read/Edit/Bash/etc., native agents, subscription authentication, and persistent
-process. Custom tools still execute in pi through the existing MCP handoff.
+This is the default from 0.9.0. `PI_CLAUDE_CLI_CONTEXT=pi` is accepted but not required. The explicit `legacy` value retains the observer implementation documented in [ARCHITECTURE.md](ARCHITECTURE.md).
 
-## One owner for each layer
+## Request contract
 
-| Layer                                         | Owner under this policy                                                                                   |
-| --------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| Base operating prompt and native tool schemas | Claude Code, unchanged                                                                                    |
-| Project instructions and skill index          | pi, loaded once before calling the provider                                                               |
-| Artifact and other custom-tool guidance       | pi, preserved                                                                                             |
-| Generated core tool vocabulary                | Provider aligns pi names with native schemas                                                              |
-| Custom integrations                           | Only pi's explicit MCP bridge; no personal Claude MCP/claude.ai connectors                                |
-| Explicit host guards and managed policy       | Still honored; not disabled                                                                               |
-| Conversation state and compaction             | Still two ledgers. The CLI owns compaction; a host should switch pi's off (README, "Auto-compact window") |
+The provider accepts both legacy pi `Context` and pi 0.87 `TranscriptContext`. For the latter it resolves the current prompt and tools through pi-ai's `getCurrentSystemPrompt` / `getCurrentTools`, including section replacements and tool removals. System messages are not mistaken for user conversation.
 
-```mermaid
-flowchart TD
-  P[pi context and skills] --> A[Append with pi tool vocabulary]
-  C[Claude memory and skills] --> L[Claude default prompt and native tools]
-  A --> L
-  M[Personal Claude MCP] --> L
-  L --> N[Native execution]
-  L --> B[pi custom-tool bridge]
-```
+The current prompt is passed through `--system-prompt-file`, without editing user instructions or loading AGENTS/CLAUDE files independently. One short suffix binds pi tool names to `mcp__custom-tools__<name>` with unchanged argument schemas.
 
-```mermaid
-flowchart TD
-  P[pi project context and skill index] --> A[Align generated tool guidance only]
-  A --> L[Claude default prompt and native tools]
-  T[pi custom-tool schemas] --> B[Only explicit MCP bridge]
-  B --> L
-  L --> N[Native execution unchanged]
-  L --> H[pi custom-tool handoff]
-  H --> L
-```
+Only tools in the model request are exposed through MCP. No registry-wide activation, native-tool substitutions, schema translation, or default Claude agent tools. All actual execution happens in pi, so tool-call guards, tool-result transformations and complete results have the same owner on every provider.
 
-## Host contract
+## CLI launch
 
-The policy requires **Claude Code 2.1.263+**, the tested isolation-control
-baseline. Older or unparseable versions are rejected before a model process
-starts; legacy mode retains its previous compatibility.
+The default launches with:
 
-- **Do not pass pi `--no-context-files`.** pi must supply the project context
-  before the provider disables Claude's independent loader. This also keeps
-  context available when a session switches to a native pi provider.
-- Leave `PI_CLAUDE_CLI_SYSTEM_PROMPT` at `claude` (default). Combining this
-  policy with prompt replacement is rejected, not silently normalized.
-- The provider passes `--strict-mcp-config --setting-sources ""`,
-  `--disable-slash-commands`, and `--no-chrome`. It sets
-  `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`, `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, and
-  `ENABLE_CLAUDEAI_MCP_SERVERS=false` on the child only.
-- `PI_CLAUDE_CLI_SETTINGS` remains available for explicit host hooks and
-  permissions. There is deliberately no blanket `disableAllHooks` setting:
-  that could disable the host's own safety guards. Managed policy still applies.
-- Do not combine with `--bare`/`CLAUDE_CODE_SIMPLE`: bare skips subscription
-  OAuth/keychain authentication. An inherited simple or safe mode is rejected
-  because its authentication/MCP behavior conflicts with this policy.
-- Set the policy on the pi process, not globally in the user's Claude settings.
-  Other pi providers ignore it. This does not alter standalone Claude Code.
+- `--system-prompt-file`, even for an empty pi prompt
+- `--tools "" --no-session-persistence`
+- `--strict-mcp-config --setting-sources "" --disable-slash-commands --no-chrome`
+- the explicit pi MCP bridge and optional host `--settings`
 
-The alignment changes only the recognized, generated pi preamble. Native
-file/edit descriptions are schema-appropriate; pi-only multi-edit instructions
-are removed there. That removal keys on `edits[]` — pi's edit signature, which
-native Edit does not have — so it holds whatever wording pi ships. Matching a
-list of known phrasings instead let pi 0.85.1's "Keep edits[].oldText as small
-as possible…" through to live sessions. Search tools are not assumed: some
-CLI/model inventories omit Grep/Glob, so guidance uses native search tools only
-when advertised and Bash otherwise. Custom-tool descriptions and artifact
-guidelines remain.
-User directives, project-file contents, skill indexes, and `.pi` paths in the
-suffix are preserved byte-for-byte. A vocabulary binding explains how names
-inside those unchanged instructions map to the actual tools. Unknown/custom
-prompt formats are preserved, not rewritten speculatively.
+Child-only environment disables independent CLAUDE.md/auto-memory discovery, claude.ai MCP connectors, tool search and CLI auto-compaction. Subscription OAuth/keychain access is retained. `--bare`, inherited simple mode and safe mode are not substitutes. Explicit host guards and managed policy still apply. Standalone Claude Code settings are never modified.
 
-The provider does **not** independently load AGENTS.md or append a
-history-dependent tool-results paragraph under this policy. Standalone legacy
-behavior remains available with the variable unset or set to `legacy`.
+## Conversation synchronization
 
-## Existing sessions
+A CLI process is a disposable cache, not another source of truth. After each successful provider episode, the provider records a hash and length of the pi history it acknowledged, including the emitted assistant message. It hashes model-visible content, excluding timestamps, usage and thinking signatures.
 
-Start a **fresh pi session** when changing policies. A saved prompt marker
-identifies the policy, and mismatched/missing saved prompts are refused before
-resuming the old Claude transcript. This avoids silently mixing a newly
-cleaned prompt with old CLI memory. No old session is deleted or migrated.
-Same-policy follow-ups keep the warm process and the saved prompt bytes.
+Reuse requires an unchanged history prefix and launch signature. A tool handoff must also contain exactly the awaited tool results. Changed history, prompt or tools retire the process and import pi's current context in order. This covers native-provider turns, branch edits, compaction, extension context rewrites and process restarts. No stale saved prompt or CLI transcript is resumed.
 
-This is not complete pi execution ownership, an OS sandbox, or a guarantee of
-identical coding quality. Native agents and native tools remain native; pi
-extension vetoes do not automatically apply to them. Claude's default prompt,
-internal runtime, service policies, and its own compaction remain.
+Model selection, session start/shutdown, tree navigation and compaction retire parked processes. Rate-limit and agent status are cleared on lifecycle resets. Old policy pairings and saved prompt sidecars are detached on the next pi-owned request; archived Claude transcripts are not deleted or read.
+
+A CLI import uses ordered, role-labelled content because print mode does not accept an arbitrary structured transcript. Every supplied user/tool image and tool result is retained, including errors; internal thinking is not replayed. This is semantic continuity, not identical wire requests or guaranteed identical model behavior.
+
+## Compaction and failure
+
+pi owns compaction and retry. Hosts must stop forcing `set_auto_compaction: false` for this provider. A compacted pi history invalidates the disposable Claude process before the next request. Errors and aborts return structured assistant errors, not raw strings or success messages; the existing overflow normalizer enables pi's recovery path.
+
+A stopped/failed process is not reused. Default runs write no Claude conversation file or resume sidecar. Temporary MCP configuration is removed on retirement/exit; prompt staging files are removed after an episode and the private runtime directory on pi exit. SIGKILL cannot run cleanup and may leave its private directory.
 
 ## Verification
+
+Unit coverage includes changed prompts, branch/compaction rewrites, foreign-provider turns, unchanged-prefix reuse, complete replay, inactive/removed tools, current pi transcript format, lifecycle retirement and structured errors. Legacy tests explicitly select `legacy`.
 
 ```sh
 npm run typecheck
 npm run lint
 npm run test:coverage
-PI_CLAUDE_CLI_CONTEXT_LIVE=1 npx vitest run tests/live-context-policy.test.ts
+npm run test:e2e
+PI_OWNED_LIVE=1 npx vitest run tests/live-context-policy.test.ts tests/live-pi-roundtrip.test.ts
 ```
 
-The opt-in live test spends real subscription tokens in a disposable workspace.
-It verifies native Read, a pi skill, a real custom-tool handoff, explicit host
-hook execution, absence of foreign project hooks/MCP, no native skill index,
-absence of foreign memory/skill sentinels in the saved CLI transcript, and one
-process across two turns. It does not touch user integrations or settings.
-
-Validated on Claude Code **2.1.263**, Haiku 4.5: 1 pi project block, 1 pi skill
-index, 0 native skills, only `custom-tools` as an MCP server, 1 process.
-The final fixture's appended prompt was 1,537 characters; input context was
-38,948 then 39,124 tokens (38,938 cache-read on the follow-up). These are fixture
-measurements, **not a before/after savings benchmark or the full system prompt**.
+Live checks use isolated fixtures, not user integrations. The CLI check verifies the tool inventory, handoff execution, host hooks, warm follow-ups and absence of new transcript/sidecar files. The real-pi RPC check executes read/edit, enforces a pi guard, switches through a deterministic native provider, then performs pi compaction and verifies recall. They spend subscription tokens and do not assert a universal token saving.
