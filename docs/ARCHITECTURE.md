@@ -32,8 +32,9 @@ paths:
   `No API provider registered for api: pi-claude-cli`.
 
 The model list is pi's own Anthropic catalogue re-parented under the
-`pi-claude-cli` provider id, with `thinkingLevelMap` widened so the full
-effort range (through `max`) is selectable.
+`pi-claude-cli` provider id, each model with pi's own `thinkingLevelMap`, so
+pi offers the same thinking levels it offers for that model natively (see
+"Thinking: the same request pi would send").
 
 ## One turn on the wire
 
@@ -77,7 +78,8 @@ claude -p --input-format stream-json --output-format stream-json
        --verbose --include-partial-messages
        --model <id> --permission-prompt-tool stdio
        (--session-id <pi session id> | --resume <pi session id>)
-       [--effort <level>] [--mcp-config <tmp>]
+       [--thinking disabled | --max-thinking-tokens <n> --effort <level>
+        --thinking-display summarized] [--mcp-config <tmp>]
        [--strict-mcp-config --setting-sources ""]   # hermetic mode
 ```
 
@@ -182,6 +184,64 @@ Two caveats, both deliberate:
 - Older CLIs send no `modelUsage`. The bridge falls back to `result.usage`,
   and an empty object is treated as absent rather than as a zero bill.
 
+### Thinking: the same request pi would send (0.10.0)
+
+A pi thinking level reaches the model as the same request fields pi's own
+Anthropic provider sends for it (pi-ai `streamSimple`). `thinking-config.ts`
+mirrors that mapping:
+
+| pi level      | Spawn flags                                                        | On a live process                                                     |
+| ------------- | ------------------------------------------------------------------ | --------------------------------------------------------------------- |
+| off           | `--thinking disabled`                                              | `set_max_thinking_tokens 0`                                           |
+| minimal … max | `--max-thinking-tokens B --effort E --thinking-display summarized` | `set_max_thinking_tokens B` + display, then `apply_flag_settings` `E` |
+
+- **B** is pi's budget for the level (1,024 / 2,048 / 8,192 / 16,384; xhigh
+  and max clamp to high), or the host's custom `thinkingBudgets`.
+- **E** is the model's `thinkingLevelMap` entry when it names an effort,
+  otherwise low / medium / high, as pi-ai's `mapThinkingLevelToEffort`.
+- One flag set serves every model: budget models (Haiku 4.5, Opus 4.5,
+  Sonnet 4.5) read the budget and ignore the effort; adaptive models read the
+  effort and take any positive budget as "on". Verified on claude 2.1.283
+  through a logging proxy; all four flags and both controls exist in 2.1.263,
+  the pi-context floor.
+- A model whose map says `off: null` gets no flags for `off`, the way pi-ai
+  sends no `thinking` field there. pi does not offer `off` for those models.
+- `PI_CLAUDE_CLI_THINKING_DISPLAY=omitted` asks for no summaries. The default
+  is `summarized`, as pi-ai's: billing counts the full thinking either way.
+
+Before 0.10.0 only `--effort` was passed. Budget models ignored it and
+thought with the CLI's 31,999-token default at every level, pi's `off` (which
+pi passes as no level) reached the CLI as no flag, so Sonnet 5 ran adaptive
+at effort `high`, and adaptive models streamed no thinking text because the
+CLI's default display is `omitted`.
+
+**Changing the level mid-session keeps the process.** Thinking is not part
+of the reuse signature. Before writing a new user turn to a parked process,
+`CliProcess.applyThinking` sends the control requests above, each with its
+own `request_id`, and waits for every `control_response` (intercepted in
+`handleLine`, never forwarded to an episode). If one is refused or not
+answered within `THINKING_CONTROL_TIMEOUT_MS` (5 s), the process is retired
+and a fresh one spawns with the new flags, so the turn is right either way.
+`max_thinking_tokens` is always a number: on 2.1.263 an omitted value resets
+the budget, on 2.1.283 it leaves it.
+
+Claude Code reads thinking once per user turn. A change made while a tool
+runs (a handoff) is not applied to the rest of that turn; it lands on the
+next user turn, still on the same process. Verified live: a change sent
+during a `sleep` tool call returned success, the continuation kept the old
+budget, the next turn had the new one.
+
+Cache cost is the API's: on adaptive models the effort and on/off state are
+part of the prompt-cache key, so the first switch to a setting the session
+has not used re-writes the prompt, and switching back reads it from cache.
+Native pi pays the same, except on Opus 5, Opus 5.5 and Fable 5.1, where it
+sends effort as mid-conversation messages behind a beta Claude Code does
+not use.
+
+`tests/live-thinking.test.ts` (`PI_OWNED_LIVE=1`) drives one pi session per
+model through level changes and asserts, from the request bodies, that every
+turn ran at the level set before it on exactly one CLI process.
+
 ### Effort maps 1:1, and never upward (0.4.12)
 
 `--effort` used to be shifted up a rung for opus: `medium` became `high` and
@@ -201,17 +261,19 @@ and 43.4M cache-read tokens in eight minutes, from a UI whose chip read
 "High".
 
 Every level now passes through unchanged. `minimal` still floors at `low`
-because the CLI has no rung below it; that is a floor, and the invariant the
-tests enforce is one-directional — **no level ever maps above what the host
-asked for**.
+because the CLI has no effort rung below it (budget models get their own
+1,024-token budget for it); that is a floor, and the invariant is
+one-directional: **no level ever maps above what the host asked for**.
 
 ### Thinking blocks are materialized lazily (0.4.4)
 
-Most Claude models stream **encrypted** thinking: a multi-kilobyte
-`signature_delta` plus `thinking_delta` events whose text is the empty
-string, and no plaintext ever. Measured with identical prompts at
-`--thinking medium` on real turns: fable-5, opus-5 and sonnet-5 all do this;
-**haiku-4-5 is the only family that sends plaintext**.
+Adaptive Claude models (fable-5, opus-5, sonnet-5) stream **encrypted**
+thinking when the display is `omitted`, which is the CLI's default: a
+multi-kilobyte `signature_delta` plus `thinking_delta` events whose text is
+the empty string, and no plaintext ever. Haiku 4.5 sends plaintext either
+way. Since 0.10.0 the provider asks for `summarized`, so every model streams
+a summary, but `PI_CLAUDE_CLI_THINKING_DISPLAY=omitted` and thinking the
+model chose to skip still produce signature-only blocks.
 
 Materializing on `content_block_start` therefore produced thinking blocks
 with a 3k signature and zero characters of text, which front-ends faithfully
@@ -547,7 +609,8 @@ none is — a built-in tool's result during a handoff, a sub-agent event — are
 buffered and replayed to the next episode. Permission requests are answered
 attached or not. The process is retired (interrupt if a turn is live, then
 stdin EOF, then SIGKILL after a grace) whenever the next call cannot use it:
-different model/effort/prompt mode/cwd, a rewritten tool schema (`version`
+different model/prompt mode/cwd, a thinking change the process refused
+(see "Thinking"), a rewritten tool schema (`version`
 bump — the CLI advertised the old surface at connect), a stale pi history, a
 delta that is not exactly the awaited tool results, or the idle timers
 (`PI_CLAUDE_CLI_HANDOFF_WAIT_MS` for a handoff pi never answers). Retiring

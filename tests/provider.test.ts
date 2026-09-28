@@ -421,79 +421,55 @@ describe("streamViaCli", () => {
     expect(parsed.response.response.behavior).toBe("allow");
   });
 
-  describe("thinking effort wiring", () => {
-    it("passes effort to spawnClaude when options.reasoning is provided on non-Opus model", async () => {
-      const model = mockModels[0] as any; // sonnet (non-Opus)
-      const context = {
-        messages: [{ role: "user", content: "Think about this" }],
-      };
-
-      streamViaCli(model, context, { reasoning: "high" } as any);
+  describe("thinking wiring", () => {
+    const spawnedWith = async (model: any, options?: any) => {
+      streamViaCli(
+        model,
+        { messages: [{ role: "user", content: "Think about this" }] },
+        options,
+      );
       await vi.advanceTimersByTimeAsync(0);
+      return (spawn as any).mock.calls[0][1] as string[];
+    };
+    const after = (args: string[], flag: string) =>
+      args.indexOf(flag) === -1 ? undefined : args[args.indexOf(flag) + 1];
 
-      // Verify spawn was called with effort arg
-      const args = (spawn as any).mock.calls[0][1] as string[];
-      expect(args).toContain("--effort");
-      const idx = args.indexOf("--effort");
-      expect(args[idx + 1]).toBe("high");
+    it("starts pi's level as budget, effort and summaries", async () => {
+      const args = await spawnedWith(mockModels[1], { reasoning: "medium" });
+      expect(after(args, "--max-thinking-tokens")).toBe("8192");
+      expect(after(args, "--effort")).toBe("medium");
+      expect(after(args, "--thinking-display")).toBe("summarized");
     });
 
     // #22: the opus shift sent `max` for `high`, and Claude Code skills size
     // their sub-agent fan-out from this flag.
-    it("passes high effort to spawnClaude for high reasoning on Opus, not max", async () => {
-      const model = mockModels[1] as any; // opus
-      const context = {
-        messages: [{ role: "user", content: "Think about this" }],
-      };
-
-      streamViaCli(model, context, { reasoning: "high" } as any);
-      await vi.advanceTimersByTimeAsync(0);
-
-      const args = (spawn as any).mock.calls[0][1] as string[];
-      expect(args).toContain("--effort");
-      const idx = args.indexOf("--effort");
-      expect(args[idx + 1]).toBe("high");
+    it("passes high effort for high reasoning on Opus, not max", async () => {
+      const args = await spawnedWith(mockModels[1], { reasoning: "high" });
+      expect(after(args, "--effort")).toBe("high");
+      expect(after(args, "--max-thinking-tokens")).toBe("16384");
     });
 
-    it("does not pass effort when reasoning is undefined", async () => {
-      const model = mockModels[0] as any;
-      const context = {
-        messages: [{ role: "user", content: "Hello" }],
-      };
+    it("turns pi's off into thinking disabled instead of the CLI default", async () => {
+      // pi passes reasoning: undefined for off. Before 0.10.0 that meant no
+      // flag, so Haiku thought at 31,999 and Sonnet 5 at effort high.
+      const args = await spawnedWith(mockModels[1]);
+      expect(after(args, "--thinking")).toBe("disabled");
+      expect(args).not.toContain("--effort");
+      expect(args).not.toContain("--max-thinking-tokens");
+    });
 
-      streamViaCli(model, context);
-      await vi.advanceTimersByTimeAsync(0);
-
-      const args = (spawn as any).mock.calls[0][1] as string[];
+    it("passes no thinking flags for a model without reasoning", async () => {
+      const args = await spawnedWith(mockModels[0], { reasoning: "high" });
+      expect(args).not.toContain("--thinking");
       expect(args).not.toContain("--effort");
     });
 
-    it("passes medium effort for medium reasoning on non-Opus", async () => {
-      const model = mockModels[0] as any; // sonnet
-      const context = {
-        messages: [{ role: "user", content: "Think" }],
-      };
-
-      streamViaCli(model, context, { reasoning: "medium" } as any);
-      await vi.advanceTimersByTimeAsync(0);
-
-      const args = (spawn as any).mock.calls[0][1] as string[];
-      const idx = args.indexOf("--effort");
-      expect(args[idx + 1]).toBe("medium");
-    });
-
-    it("passes medium effort for medium reasoning on Opus too (no up-shift)", async () => {
-      const model = mockModels[1] as any; // opus
-      const context = {
-        messages: [{ role: "user", content: "Think" }],
-      };
-
-      streamViaCli(model, context, { reasoning: "medium" } as any);
-      await vi.advanceTimersByTimeAsync(0);
-
-      const args = (spawn as any).mock.calls[0][1] as string[];
-      const idx = args.indexOf("--effort");
-      expect(args[idx + 1]).toBe("medium");
+    it("honours pi's custom thinking budgets", async () => {
+      const args = await spawnedWith(mockModels[1], {
+        reasoning: "low",
+        thinkingBudgets: { low: 3000 },
+      });
+      expect(after(args, "--max-thinking-tokens")).toBe("3000");
     });
   });
 

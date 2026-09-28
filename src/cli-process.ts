@@ -41,6 +41,11 @@ import {
   type HandoffTarget,
 } from "./handoff-broker.js";
 import type { NdjsonMessage } from "./types.js";
+import {
+  thinkingControls,
+  type CliThinking,
+  type ThinkingControl,
+} from "./thinking-config.js";
 
 /** Refusal for a `tools/call` that names no live tool_use block of ours. */
 export const UNMATCHED_CALL_MESSAGE =
@@ -118,6 +123,14 @@ const DETACHED_BUFFER_LIMIT = 20_000;
 const EXIT_GRACE_MS = 500;
 /** Grace after an interrupt for the CLI to persist the turn and emit result. */
 const INTERRUPT_GRACE_MS = 2_000;
+/**
+ * How long a thinking change may take to be acknowledged. The CLI answers in
+ * milliseconds; past this the process is treated as unable to take it and the
+ * provider spawns a fresh one with the right flags instead.
+ */
+export const THINKING_CONTROL_TIMEOUT_MS = 5_000;
+
+let controlSeq = 0;
 
 export class CliProcess implements HandoffTarget {
   readonly proc: ChildProcess;
@@ -129,6 +142,11 @@ export class CliProcess implements HandoffTarget {
   readonly getStderr: () => string;
   /** Pi history acknowledged by this disposable process, never a second ledger. */
   piHistory?: { length: number; hash: string };
+  /**
+   * The thinking the CLI will use for its next user turn: the spawn flags,
+   * then every change `applyThinking` got acknowledged.
+   */
+  thinking: CliThinking;
 
   /** A user message has been written and no `result` has followed yet. */
   turnActive = false;
@@ -167,6 +185,8 @@ export class CliProcess implements HandoffTarget {
   private idleTimer: ReturnType<typeof setTimeout> | undefined;
   private closeWaiters: Array<() => void> = [];
   private onExitHandlers: Array<(code: number | null) => void> = [];
+  /** Our own control requests awaiting the CLI's answer, by request id. */
+  private controlWaiters = new Map<string, (ok: boolean) => void>();
 
   constructor(
     proc: ChildProcess,
@@ -175,6 +195,7 @@ export class CliProcess implements HandoffTarget {
       signature: string;
       allowHandoff: boolean;
       getStderr: () => string;
+      thinking?: CliThinking;
     },
   ) {
     this.proc = proc;
@@ -182,6 +203,7 @@ export class CliProcess implements HandoffTarget {
     this.signature = options.signature;
     this.allowHandoff = options.allowHandoff;
     this.getStderr = options.getStderr;
+    this.thinking = options.thinking ?? { kind: "default" };
 
     if (this.allowHandoff) registerHandoffTarget(this.cliSessionId, this);
 
@@ -247,6 +269,72 @@ export class CliProcess implements HandoffTarget {
   writeUser(prompt: string | any[]): void {
     this.turnActive = true;
     writeUserMessage(this.proc, prompt);
+  }
+
+  /**
+   * Move the process to `desired` thinking before its next user turn.
+   *
+   * Resolves true once every control request is acknowledged. False means
+   * the process cannot take the change in place (a live turn, a dead or
+   * retired process, a CLI refusal, no answer within
+   * THINKING_CONTROL_TIMEOUT_MS, or a target only a spawn can reach). The
+   * caller then retires it and spawns with the right flags, so the next turn
+   * is correct either way; only the warm process is lost.
+   *
+   * Only called between turns: the CLI reads thinking once per user turn, so
+   * a change sent mid-turn would not reach the rest of that turn anyway
+   * (verified on 2.1.283 with a change sent during a tool call).
+   */
+  async applyThinking(desired: CliThinking): Promise<boolean> {
+    const controls = thinkingControls(this.thinking, desired);
+    if (controls === undefined) return false;
+    for (const control of controls) {
+      if (!(await this.sendControl(control))) return false;
+    }
+    this.thinking = desired;
+    return true;
+  }
+
+  private sendControl(request: ThinkingControl): Promise<boolean> {
+    const stdin = this.proc.stdin;
+    if (
+      !this.alive ||
+      this.retired ||
+      this.turnActive ||
+      this.stdoutClosed ||
+      !stdin
+    )
+      return Promise.resolve(false);
+    const requestId = `pcc-${(++controlSeq).toString(36)}-${Date.now().toString(36)}`;
+    return new Promise<boolean>((resolve) => {
+      const timer = setTimeout(
+        () => settle(false),
+        THINKING_CONTROL_TIMEOUT_MS,
+      );
+      timer.unref?.();
+      const settle = (ok: boolean) => {
+        clearTimeout(timer);
+        this.controlWaiters.delete(requestId);
+        resolve(ok);
+      };
+      this.controlWaiters.set(requestId, settle);
+      try {
+        stdin.write(
+          JSON.stringify({
+            type: "control_request",
+            request_id: requestId,
+            request,
+          }) + "\n",
+        );
+      } catch {
+        settle(false);
+      }
+    });
+  }
+
+  /** Answer every outstanding control request with a failure. */
+  private failControlWaiters(): void {
+    for (const settle of [...this.controlWaiters.values()]) settle(false);
   }
 
   /**
@@ -366,6 +454,7 @@ export class CliProcess implements HandoffTarget {
     this.clearIdleTimer();
     unregisterHandoffTarget(this.cliSessionId, this);
     this.failPendingCalls("pi abandoned this tool call.");
+    this.failControlWaiters();
     if (!this.alive) return Promise.resolve();
 
     // Resolves on close, or once the SIGKILL has been issued — a caller that
@@ -412,6 +501,16 @@ export class CliProcess implements HandoffTarget {
     const msg = parseLine(line);
     if (!msg) return;
 
+    // The answer to a control request of ours goes to whoever sent it, never
+    // to an episode or the detached buffer: it is not part of any turn.
+    if (msg.type === "control_response") {
+      const settle = this.controlWaiters.get(msg.response?.request_id);
+      if (settle) {
+        settle(msg.response.subtype === "success");
+        return;
+      }
+    }
+
     if (msg.type === "control_request") {
       // Answered here so a permission prompt is never left waiting while no
       // episode is attached (the CLI runs built-in tools during a handoff).
@@ -443,6 +542,7 @@ export class CliProcess implements HandoffTarget {
     this.stdoutClosed = true;
     // No more output means no result is coming: the turn is over.
     this.turnActive = false;
+    this.failControlWaiters();
     if (!this.closed) this.sink?.onClose(this.exitCode ?? null);
   }
 
@@ -456,6 +556,7 @@ export class CliProcess implements HandoffTarget {
     this.clearIdleTimer();
     unregisterHandoffTarget(this.cliSessionId, this);
     this.failPendingCalls("the Claude CLI process exited.");
+    this.failControlWaiters();
     const waiters = this.closeWaiters;
     this.closeWaiters = [];
     for (const w of waiters) w();

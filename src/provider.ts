@@ -54,7 +54,7 @@ import type {
   ClaudeUsage,
   TaskTrackerState,
 } from "./types.js";
-import { mapThinkingEffort } from "./thinking-config.js";
+import { resolveCliThinking } from "./thinking-config.js";
 import { isHandoffClaudeTool, mapClaudeToolNameToPi } from "./tool-mapping.js";
 import { resolveAutocompact } from "./autocompact.js";
 import {
@@ -407,9 +407,9 @@ export function streamViaCli(
       const messages = context.messages as any[];
       const stale = cliSessionIsStale(messages);
       const delta = deltaMessages(messages);
-      const effort = mapThinkingEffort(
+      const thinking = resolveCliThinking(
+        model,
         options?.reasoning,
-        model.id,
         options?.thinkingBudgets,
       );
       const systemPromptMode = piOwned ? "pi" : resolveSystemPromptMode();
@@ -429,9 +429,11 @@ export function streamViaCli(
       // The proxy needs a pi session to route the continuation back to.
       const allowHandoff =
         handoffProxyAllowed() && !!piSessionId && !!handoffSocketPath;
+      // Thinking is deliberately absent: a live process takes a new level
+      // through control requests (step 1), so changing it mid-session no
+      // longer costs a respawn and a full-history replay.
       const signature = JSON.stringify([
         model.id,
-        effort ?? null,
         systemPromptMode,
         piContext,
         piOwned ? context.systemPrompt : null,
@@ -479,6 +481,12 @@ export function streamViaCli(
           } else if (toolResults.length === 0 && userMessages.length > 0) {
             mode = "turn";
           }
+        }
+        // A new user turn runs at the level pi asks for now. A handoff keeps
+        // the turn it is continuing: the CLI reads thinking once per user
+        // turn, so a change made mid-turn applies from the next one.
+        if (mode === "turn" && !(await parkedCli.applyThinking(thinking))) {
+          mode = "spawn";
         }
         if (mode === "spawn") {
           // Different spawn parameters, stale history, or a delta the live
@@ -542,7 +550,7 @@ export function streamViaCli(
         const proc = spawnClaude(model.id, systemPrompt || undefined, {
           cwd,
           signal: options?.signal,
-          effort,
+          thinking,
           mcpConfigPath,
           resumeSessionId,
           newSessionId: newCliId,
@@ -565,6 +573,7 @@ export function streamViaCli(
           signature,
           allowHandoff,
           getStderr,
+          thinking,
         });
         cli.writeUser(prompt);
       }

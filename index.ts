@@ -204,12 +204,13 @@ export default function (pi: ExtensionAPI) {
       cost: model.cost,
       contextWindow: model.contextWindow,
       maxTokens: model.maxTokens,
-      // pi's thinking selector only offers xhigh/max when the model's
-      // thinkingLevelMap declares them (getSupportedThinkingLevels in pi-ai);
-      // without this, every model is capped at "high" in the UI. The mapped
-      // values are unused by this provider — effort is derived from
-      // options.reasoning in mapThinkingEffort.
-      thinkingLevelMap: { xhigh: "xhigh", max: "max" },
+      // pi's own per-model map, so the selector offers what pi offers for
+      // the same model natively and each level maps to the same effort
+      // (resolveCliThinking reads it). It used to be widened to
+      // { xhigh, max } for every model, which offered xhigh/max on budget
+      // models that ignore effort, xhigh on Opus/Sonnet 4.6, and `off` on
+      // models whose thinking cannot be turned off.
+      thinkingLevelMap: model.thinkingLevelMap,
     }));
 
     // Never change pi's active tools simply because this provider is installed.

@@ -76,4 +76,29 @@ if grep -q "Search for a local checkout" <<<"$FAN"; then
   echo "e2e FAILED: an auto-backgrounded Bash was reported as a sub-agent" >&2
   exit 1
 fi
+# pi's thinking level must reach the CLI as the flags pi's own Anthropic
+# provider would send: off as thinking disabled (pi passes no level for off),
+# anything else as budget + effort + summaries.
+ARGV_FILE="$WORK_DIR/argv.jsonl"
+run_thinking() {
+  : >"$ARGV_FILE"
+  cd "$WORK_DIR" && CLAUDE_STUB_ARGV_FILE="$ARGV_FILE" PI_CLAUDE_CLI_KEEPALIVE_MS=0 PATH="$STUB_DIR:$PATH" ${TIMEOUT[@]+"${TIMEOUT[@]}"} \
+    pi -ne -e "$EXT_DIR" -p --model "pi-claude-cli/claude-haiku-4-5" --thinking "$1" "magic word" \
+    </dev/null >/dev/null
+  grep -- '--input-format' "$ARGV_FILE" | tail -1
+}
+OFF_ARGV="$(run_thinking off)"
+HIGH_ARGV="$(run_thinking high)"
+echo "--- thinking argv ---"
+echo "off:  $OFF_ARGV"
+echo "high: $HIGH_ARGV"
+echo "---------------------"
+if ! grep -q '"--thinking","disabled"' <<<"$OFF_ARGV" || grep -q -- '--effort' <<<"$OFF_ARGV"; then
+  echo "e2e FAILED: pi's off did not reach the CLI as --thinking disabled" >&2
+  exit 1
+fi
+if ! grep -q '"--max-thinking-tokens","16384","--effort","high","--thinking-display","summarized"' <<<"$HIGH_ARGV"; then
+  echo "e2e FAILED: pi's high did not reach the CLI as budget 16384 + effort high + summaries" >&2
+  exit 1
+fi
 echo "e2e OK"

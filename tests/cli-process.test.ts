@@ -11,7 +11,9 @@ import {
   subUsage,
   maxUsage,
   UNMATCHED_CALL_MESSAGE,
+  THINKING_CONTROL_TIMEOUT_MS,
 } from "../src/cli-process";
+import type { CliThinking } from "../src/thinking-config";
 import {
   dispatchHandoffCall,
   resetHandoffBrokerForTests,
@@ -376,5 +378,144 @@ describe("CliProcess", () => {
         u(10, 20, 30, 40),
       );
     });
+  });
+});
+
+describe("CliProcess.applyThinking", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    resetCliProcessesForTests();
+    resetHandoffBrokerForTests();
+  });
+  afterEach(() => {
+    resetCliProcessesForTests();
+    vi.useRealTimers();
+  });
+
+  const enabled = (budgetTokens: number, effort: any): CliThinking => ({
+    kind: "enabled",
+    budgetTokens,
+    effort,
+    display: "summarized",
+  });
+  const start = (thinking: CliThinking) => {
+    const proc = fakeProc();
+    const cli = new CliProcess(proc, {
+      cliSessionId: "cli-t",
+      signature: "sig",
+      allowHandoff: false,
+      getStderr: () => "",
+      thinking,
+    });
+    return { proc, cli };
+  };
+  /** Control requests written to the CLI so far. */
+  const controls = (proc: any) =>
+    (proc.stdin.write as any).mock.calls
+      .map((c: any) => JSON.parse(String(c[0])))
+      .filter((m: any) => m.type === "control_request");
+  const answer = async (proc: any, requestId: string, subtype = "success") => {
+    proc.stdout.write(
+      JSON.stringify({
+        type: "control_response",
+        response: { subtype, request_id: requestId },
+      }) + "\n",
+    );
+    await vi.advanceTimersByTimeAsync(0);
+  };
+  const settled = async (p: Promise<boolean>) => {
+    let value: boolean | undefined;
+    void p.then((v) => (value = v));
+    await vi.advanceTimersByTimeAsync(0);
+    return value;
+  };
+
+  it("sends each control only after the previous one is acknowledged", async () => {
+    const { proc, cli } = start(enabled(8192, "medium"));
+    const p = cli.applyThinking(enabled(16384, "high"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(controls(proc).map((c: any) => c.request)).toEqual([
+      {
+        subtype: "set_max_thinking_tokens",
+        max_thinking_tokens: 16384,
+        thinking_display: "summarized",
+      },
+    ]);
+    await answer(proc, controls(proc)[0].request_id);
+    expect(controls(proc)[1].request).toEqual({
+      subtype: "apply_flag_settings",
+      settings: { effortLevel: "high" },
+    });
+    expect(await settled(p)).toBeUndefined();
+    await answer(proc, controls(proc)[1].request_id);
+    expect(await p).toBe(true);
+    expect(cli.thinking).toEqual(enabled(16384, "high"));
+    // Each request carries its own id.
+    const ids = controls(proc).map((c: any) => c.request_id);
+    expect(new Set(ids).size).toBe(2);
+  });
+
+  it("writes nothing when the process already runs that thinking", async () => {
+    const { proc, cli } = start({ kind: "disabled" });
+    expect(await cli.applyThinking({ kind: "disabled" })).toBe(true);
+    expect(controls(proc)).toHaveLength(0);
+  });
+
+  it("keeps its own acknowledgements away from episodes, attached or not", async () => {
+    const { proc, cli } = start(enabled(8192, "medium"));
+    const p = cli.applyThinking({ kind: "disabled" });
+    await vi.advanceTimersByTimeAsync(0);
+    await answer(proc, controls(proc)[0].request_id); // detached: not buffered
+    expect(await p).toBe(true);
+    const q = cli.applyThinking(enabled(2048, "low"));
+    await vi.advanceTimersByTimeAsync(0);
+    const { messages, s } = sink();
+    cli.attach(s);
+    await answer(proc, controls(proc)[1].request_id); // attached
+    await answer(proc, controls(proc)[2].request_id);
+    expect(await q).toBe(true);
+    // An answer to something else (an interrupt) still flows as before.
+    await answer(proc, "int-someone-else");
+    expect(messages.map((m) => m.type)).toEqual(["control_response"]);
+    expect((messages[0] as any).response.request_id).toBe("int-someone-else");
+  });
+
+  it("fails and keeps the old thinking when the CLI refuses", async () => {
+    const { proc, cli } = start(enabled(8192, "medium"));
+    const p = cli.applyThinking(enabled(8192, "low"));
+    await vi.advanceTimersByTimeAsync(0);
+    await answer(proc, controls(proc)[0].request_id, "error");
+    expect(await p).toBe(false);
+    expect(cli.thinking).toEqual(enabled(8192, "medium"));
+  });
+
+  it("fails when the CLI never answers", async () => {
+    const { cli } = start(enabled(8192, "medium"));
+    const p = cli.applyThinking({ kind: "disabled" });
+    await vi.advanceTimersByTimeAsync(THINKING_CONTROL_TIMEOUT_MS - 1);
+    expect(await settled(p)).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await p).toBe(false);
+  });
+
+  it("fails an outstanding change when the process exits", async () => {
+    const { proc, cli } = start(enabled(8192, "medium"));
+    const p = cli.applyThinking({ kind: "disabled" });
+    await vi.advanceTimersByTimeAsync(0);
+    proc.emit("close", 0);
+    expect(await p).toBe(false);
+  });
+
+  it("refuses during a live turn without writing anything", async () => {
+    const { proc, cli } = start(enabled(8192, "medium"));
+    cli.writeUser("working");
+    expect(await cli.applyThinking({ kind: "disabled" })).toBe(false);
+    expect(controls(proc)).toHaveLength(0);
+  });
+
+  it("refuses a target only a spawn can reach", async () => {
+    const { proc, cli } = start(enabled(8192, "medium"));
+    expect(await cli.applyThinking({ kind: "default" })).toBe(false);
+    expect(controls(proc)).toHaveLength(0);
   });
 });

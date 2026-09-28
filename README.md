@@ -42,13 +42,14 @@ See [the context contract](docs/CONTEXT-POLICY.md).
 
 The defaults above require no environment variables.
 
-| Variable                        | Default   | Purpose                                              |
-| ------------------------------- | --------- | ---------------------------------------------------- |
-| `PI_CLAUDE_CLI_KEEPALIVE_MS`    | `600000`  | Idle process lifetime; `0` for one-shot runs         |
-| `PI_CLAUDE_CLI_SETTINGS`        | unset     | Explicit host Claude settings, including guard hooks |
-| `PI_CLAUDE_CLI_TIMEOUT_MS`      | `300000`  | Maximum stdout inactivity                            |
-| `PI_CLAUDE_CLI_HANDOFF_WAIT_MS` | `1800000` | Maximum wait for pi tool execution                   |
-| `MCP_TOOL_TIMEOUT`              | `3600000` | CLI MCP call timeout                                 |
+| Variable                         | Default      | Purpose                                              |
+| -------------------------------- | ------------ | ---------------------------------------------------- |
+| `PI_CLAUDE_CLI_KEEPALIVE_MS`     | `600000`     | Idle process lifetime; `0` for one-shot runs         |
+| `PI_CLAUDE_CLI_SETTINGS`         | unset        | Explicit host Claude settings, including guard hooks |
+| `PI_CLAUDE_CLI_TIMEOUT_MS`       | `300000`     | Maximum stdout inactivity                            |
+| `PI_CLAUDE_CLI_HANDOFF_WAIT_MS`  | `1800000`    | Maximum wait for pi tool execution                   |
+| `PI_CLAUDE_CLI_THINKING_DISPLAY` | `summarized` | `omitted` returns no thinking summaries              |
+| `MCP_TOOL_TIMEOUT`               | `3600000`    | CLI MCP call timeout                                 |
 
 `PI_CLAUDE_CLI_CONTEXT=pi` explicitly selects the default. `legacy` retains the old observer behavior for compatibility, with native Claude tools, a separate persistent transcript and CLI-owned compaction. `PI_CLAUDE_CLI_SYSTEM_PROMPT`, `PI_CLAUDE_CLI_AUTOCOMPACT`, `PI_CLAUDE_CLI_TOOL_RESULTS`, `PI_CLAUDE_CLI_HERMETIC` and `PI_CLAUDE_CLI_STRICT_MCP` configure that legacy path; they do not weaken pi ownership in the default path. [Legacy architecture and wire contracts](docs/ARCHITECTURE.md).
 
@@ -70,10 +71,12 @@ The test suite retains explicit legacy fixtures and adds default-policy tests fo
 The opt-in real-CLI check spends subscription tokens in a disposable workspace:
 
 ```bash
-PI_OWNED_LIVE=1 npx vitest run tests/live-context-policy.test.ts tests/live-pi-roundtrip.test.ts
+PI_OWNED_LIVE=1 npx vitest run tests/live-context-policy.test.ts tests/live-pi-roundtrip.test.ts tests/live-thinking.test.ts
 ```
 
-The isolated CLI check verifies read/custom-tool handoffs, host hooks, discovery isolation, warm follow-ups and absence of a saved Claude transcript. The real-pi RPC check executes read/edit, enforces a pi tool guard, switches through a deterministic native provider, then compacts pi and checks recall. These checks do not measure coding-quality parity.
+The isolated CLI check verifies read/custom-tool handoffs, host hooks, discovery isolation, warm follow-ups and absence of a saved Claude transcript. The real-pi RPC check executes read/edit, enforces a pi tool guard, switches through a deterministic native provider, then compacts pi and checks recall. The thinking check changes pi's thinking level between turns on Haiku 4.5 and Sonnet 5, and during a tool call, and reads each request's `thinking` and effort through a local proxy to confirm every turn ran at the chosen level on one CLI process. These checks do not measure coding-quality parity.
+
+pi's thinking levels reach the model as the request pi's own Anthropic provider would send: `off` disables thinking, other levels send pi's budget (Haiku 4.5, Opus 4.5, Sonnet 4.5) or effort (adaptive models) with thinking summaries. A level changed mid-session applies from the next turn without restarting the CLI. Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#thinking-the-same-request-pi-would-send-0100).
 
 ## License
 

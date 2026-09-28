@@ -25,6 +25,14 @@ if (args[0] === "auth" && args[1] === "status") {
 
 const emit = (obj) => process.stdout.write(JSON.stringify(obj) + "\n");
 
+// The e2e asserts which thinking flags pi's level turned into.
+if (process.env.CLAUDE_STUB_ARGV_FILE) {
+  require("node:fs").appendFileSync(
+    process.env.CLAUDE_STUB_ARGV_FILE,
+    JSON.stringify(args) + "\n",
+  );
+}
+
 let responded = false;
 const respond = () => {
   if (responded) return;
@@ -162,9 +170,27 @@ const respondFanout = () => {
 let buf = "";
 process.stdin.on("data", (chunk) => {
   buf += chunk.toString();
-  if (!buf.includes("\n")) return;
-  if (buf.includes("fanout")) respondFanout();
-  else respond();
+  let nl;
+  while ((nl = buf.indexOf("\n")) >= 0) {
+    const line = buf.slice(0, nl);
+    buf = buf.slice(nl + 1);
+    let msg;
+    try {
+      msg = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    // Thinking changes on a live process: acknowledge, as the CLI does.
+    if (msg.type === "control_request") {
+      emit({
+        type: "control_response",
+        response: { subtype: "success", request_id: msg.request_id },
+      });
+      continue;
+    }
+    if (line.includes("fanout")) respondFanout();
+    else respond();
+  }
 });
 // Safety net: some callers write without trailing newline then wait.
 setTimeout(respond, 3000);
