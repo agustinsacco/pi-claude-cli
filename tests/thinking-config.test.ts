@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
+import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import { DEFAULT_THINKING_BUDGETS } from "@earendil-works/pi-ai/api/simple-options";
 import {
@@ -6,6 +7,7 @@ import {
   thinkingSpawnArgs,
   thinkingControls,
   sameThinking,
+  cliThinkingLevelMap,
   PI_THINKING_BUDGETS,
   type CliThinking,
 } from "../src/thinking-config";
@@ -232,5 +234,89 @@ describe("thinkingControls", () => {
     expect(
       thinkingControls({ kind: "disabled" }, { kind: "default" }),
     ).toBeUndefined();
+  });
+});
+
+describe("cliThinkingLevelMap: only levels the model has through Claude Code", () => {
+  const offered = (id: string) => {
+    const m = catalogue(id);
+    return getSupportedThinkingLevels({
+      ...m,
+      thinkingLevelMap: cliThinkingLevelMap(m),
+    } as any);
+  };
+
+  it.each([
+    [
+      ["claude-haiku-4-5", "claude-opus-4-5", "claude-sonnet-4-5"],
+      "off minimal low medium high",
+    ],
+    [["claude-opus-4-6", "claude-sonnet-4-6"], "off low medium high max"],
+    [
+      ["claude-opus-4-7", "claude-opus-4-8", "claude-sonnet-5"],
+      "off low medium high xhigh max",
+    ],
+    [
+      [
+        "claude-opus-5",
+        "claude-opus-5-5",
+        "claude-fable-5",
+        "claude-fable-5-1",
+      ],
+      "low medium high xhigh max",
+    ],
+  ])("%j offer: %s", (ids, levels) => {
+    for (const id of ids) expect(offered(id), id).toEqual(levels.split(" "));
+  });
+
+  it("changes pi's catalogue only by dropping minimal on adaptive models", () => {
+    for (const m of getBuiltinModels("anthropic")) {
+      const native = getSupportedThinkingLevels(m as any);
+      const ours = offered(m.id);
+      const adaptive = (m as any).compat?.forceAdaptiveThinking === true;
+      expect(ours, m.id).toEqual(
+        adaptive ? native.filter((l) => l !== "minimal") : native,
+      );
+    }
+  });
+
+  /**
+   * What Claude Code 2.1.283 itself reported for this account's models
+   * (`initialize` -> models[].supportedEffortLevels; Haiku reports no effort
+   * support). Pinned so a catalogue change that disagrees with the CLI shows
+   * up here rather than as a level that silently does nothing.
+   */
+  const CLAUDE_CODE_REPORT: Record<string, string[] | null> = {
+    "claude-haiku-4-5": null,
+    "claude-opus-4-6": ["low", "medium", "high", "max"],
+    "claude-sonnet-4-6": ["low", "medium", "high", "max"],
+    "claude-opus-4-7": ["low", "medium", "high", "xhigh", "max"],
+    "claude-opus-4-8": ["low", "medium", "high", "xhigh", "max"],
+    "claude-sonnet-5": ["low", "medium", "high", "xhigh", "max"],
+    "claude-opus-5": ["low", "medium", "high", "xhigh", "max"],
+    "claude-opus-5-5": ["low", "medium", "high", "xhigh", "max"],
+    "claude-fable-5": ["low", "medium", "high", "xhigh", "max"],
+    "claude-fable-5-1": ["low", "medium", "high", "xhigh", "max"],
+  };
+
+  it.each(Object.entries(CLAUDE_CODE_REPORT))(
+    "%s: the levels above off match Claude Code's own report",
+    (id, efforts) => {
+      const levels = offered(id).filter((l) => l !== "off");
+      if (efforts === null) {
+        // A budget model: every level is a budget, none is an effort.
+        expect(levels).toEqual(["minimal", "low", "medium", "high"]);
+      } else {
+        expect(levels).toEqual(efforts);
+      }
+    },
+  );
+
+  it("leaves a model without a map, or a budget model, as pi has it", () => {
+    expect(cliThinkingLevelMap({})).toBeUndefined();
+    expect(cliThinkingLevelMap({ thinkingLevelMap: null })).toBeUndefined();
+    expect(
+      cliThinkingLevelMap({ compat: { forceAdaptiveThinking: true } }),
+    ).toEqual({ minimal: null });
   });
 });

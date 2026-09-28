@@ -143,7 +143,8 @@ const MODELS: Array<{
   },
   {
     id: "claude-sonnet-5",
-    levels: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+    // minimal is not offered: on an adaptive model it is low.
+    levels: ["off", "low", "medium", "high", "xhigh", "max"],
     turns: [
       ["medium", adaptive("medium")],
       ["off", disabled],

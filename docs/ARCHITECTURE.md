@@ -32,9 +32,11 @@ paths:
   `No API provider registered for api: pi-claude-cli`.
 
 The model list is pi's own Anthropic catalogue re-parented under the
-`pi-claude-cli` provider id, each model with pi's own `thinkingLevelMap`, so
-pi offers the same thinking levels it offers for that model natively (see
-"Thinking: the same request pi would send").
+`pi-claude-cli` provider id. Each model keeps pi's own `thinkingLevelMap`,
+less `minimal` on adaptive models, where it would send exactly what `low`
+sends (`cliThinkingLevelMap`). So pi offers only levels the model has, and
+the result matches Claude Code's own per-model effort report on every model
+(see "Thinking: the same request pi would send").
 
 ## One turn on the wire
 
@@ -206,6 +208,13 @@ mirrors that mapping:
   the pi-context floor.
 - A model whose map says `off: null` gets no flags for `off`, the way pi-ai
   sends no `thinking` field there. pi does not offer `off` for those models.
+- Levels offered: pi's map, less `minimal` on adaptive models. That equals
+  what Claude Code's `initialize` reports per model (`supportedEffortLevels`,
+  pinned in `tests/thinking-config.test.ts`). The report is not read at
+  runtime: it adds nothing to pi's map, ignores `maxEffortLevel` limits, and
+  its model list is Claude Code's picker rather than access (Opus 4.5 and
+  Sonnet 4.5 are missing from it and run fine), so it cannot be used to hide
+  models.
 - `PI_CLAUDE_CLI_THINKING_DISPLAY=omitted` asks for no summaries. The default
   is `summarized`, as pi-ai's: billing counts the full thinking either way.
 

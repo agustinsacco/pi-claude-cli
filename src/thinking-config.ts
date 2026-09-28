@@ -148,6 +148,31 @@ export function resolveCliThinking(
   };
 }
 
+/**
+ * The thinking levels this provider offers for a model: pi's own map, minus
+ * what the model does not have through Claude Code.
+ *
+ * One rung is removed: `minimal` on adaptive models. Those take an effort,
+ * and the effort ladder starts at `low`, so `minimal` would send exactly the
+ * request `low` sends. Budget models keep it, where it is a distinct
+ * 1,024-token budget. Everything else is pi's catalogue as is, which was
+ * checked against Claude Code's own per-model report (`initialize` ->
+ * `models[].supportedEffortLevels`, claude 2.1.283): they agree on every
+ * model, including xhigh missing on Opus/Sonnet 4.6 and `off` missing on the
+ * Opus 5 family. The report is not used at runtime because it adds nothing
+ * pi's map lacks: it ignores `maxEffortLevel` limits, and its model list is
+ * Claude Code's picker, not access (Opus 4.5 and Sonnet 4.5 are absent from
+ * it and run fine).
+ */
+export function cliThinkingLevelMap(model: {
+  thinkingLevelMap?: ThinkingLevelMap | null;
+  compat?: { forceAdaptiveThinking?: boolean } | null;
+}): ThinkingLevelMap | undefined {
+  const map = model.thinkingLevelMap ?? undefined;
+  if (model.compat?.forceAdaptiveThinking !== true) return map;
+  return { ...map, minimal: null };
+}
+
 /** CLI flags for a spawn that should start with `thinking`. */
 export function thinkingSpawnArgs(thinking: CliThinking): string[] {
   switch (thinking.kind) {

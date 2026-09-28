@@ -76,7 +76,7 @@ PI_OWNED_LIVE=1 npx vitest run tests/live-context-policy.test.ts tests/live-pi-r
 
 The isolated CLI check verifies read/custom-tool handoffs, host hooks, discovery isolation, warm follow-ups and absence of a saved Claude transcript. The real-pi RPC check executes read/edit, enforces a pi tool guard, switches through a deterministic native provider, then compacts pi and checks recall. The thinking check changes pi's thinking level between turns on Haiku 4.5 and Sonnet 5, and during a tool call, and reads each request's `thinking` and effort through a local proxy to confirm every turn ran at the chosen level on one CLI process. These checks do not measure coding-quality parity.
 
-pi's thinking levels reach the model as the request pi's own Anthropic provider would send: `off` disables thinking, other levels send pi's budget (Haiku 4.5, Opus 4.5, Sonnet 4.5) or effort (adaptive models) with thinking summaries. A level changed mid-session applies from the next turn without restarting the CLI. Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#thinking-the-same-request-pi-would-send-0100).
+pi's thinking levels reach the model as the request pi's own Anthropic provider would send: `off` disables thinking, other levels send pi's budget (Haiku 4.5, Opus 4.5, Sonnet 4.5) or effort (adaptive models) with thinking summaries. A level changed mid-session applies from the next turn without restarting the CLI. Each model offers pi's own levels for it, less `minimal` on adaptive models (where it equals `low`). Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#thinking-the-same-request-pi-would-send-0100).
 
 ## License
 
