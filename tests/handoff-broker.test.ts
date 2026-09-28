@@ -23,6 +23,7 @@ import {
   defaultSocketPath,
   handoffSecret,
   handoffSecretFile,
+  HANDOFF_REQUEST_TIMEOUT_MS,
 } from "../src/handoff-broker";
 import type { HandoffCall, HandoffResult } from "../src/handoff-broker";
 import { cleanupRuntimeDir } from "../src/runtime-dir";
@@ -213,6 +214,68 @@ describe("handoff broker", () => {
     });
     // Starting again returns the same path without rebinding.
     expect(await startHandoffBroker(path)).toBe(path);
+  });
+
+  /**
+   * Under pi context every tool runs through this socket, `bash` included,
+   * and a build or a test suite runs for minutes. The idle timer used to keep
+   * running after the request arrived, so any tool slower than it lost its
+   * connection and the model read "pi closed the connection without a
+   * result" instead of the output pi went on to record.
+   */
+  it("keeps a dispatched call open for as long as pi runs the tool", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const path = testSocketPath("long");
+      await startHandoffBroker(path);
+      let pending: HandoffCall | undefined;
+      const received = new Promise<void>((resolve) =>
+        registerHandoffTarget("s1", {
+          onHandoffCall: (c) => {
+            pending = c;
+            resolve();
+          },
+        }),
+      );
+      const reply = request(path, {
+        type: "call",
+        session: "s1",
+        secret: handoffSecret(),
+        toolUseId: "t1",
+        name: "bash",
+        arguments: { command: "sleep 300" },
+      });
+      await received;
+      vi.advanceTimersByTime(HANDOFF_REQUEST_TIMEOUT_MS * 5);
+      pending!.respond({ content: [{ type: "text", text: "done" }] });
+      expect(JSON.parse((await reply).trim())).toEqual({
+        type: "result",
+        content: [{ type: "text", text: "done" }],
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("still drops a peer that connects and never sends a request", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const path = testSocketPath("idle");
+      await startHandoffBroker(path);
+      const sock = connect(path);
+      const closed = new Promise<void>((resolve) =>
+        sock.on("close", () => resolve()),
+      );
+      sock.on("error", () => {});
+      // Let the server accept, which is when it arms the timer.
+      for (let i = 0; i < 200 && vi.getTimerCount() === 0; i++)
+        await new Promise((r) => setImmediate(r));
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+      vi.advanceTimersByTime(HANDOFF_REQUEST_TIMEOUT_MS + 1);
+      await closed;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("answers a malformed request with an error", async () => {
