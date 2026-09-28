@@ -22,6 +22,7 @@ import {
   assertContextCliVersion,
 } from "./context-policy.js";
 import { envFlag, isEphemeral } from "./env-flag.js";
+import { thinkingSpawnArgs, type CliThinking } from "./thinking-config.js";
 
 /**
  * Spawn a Claude CLI subprocess with all required flags for stream-json communication.
@@ -31,7 +32,7 @@ import { envFlag, isEphemeral } from "./env-flag.js";
  *   to Claude Code's own via --append-system-prompt-file; in `pi` mode it
  *   replaces it via --system-prompt-file. The `-file` suffix is required: the
  *   unsuffixed flags take a literal string. See src/system-prompt-mode.ts.
- * @param options - Optional cwd, AbortSignal, effort level and prompt mode
+ * @param options - Optional cwd, AbortSignal, thinking and prompt mode
  * @returns The spawned ChildProcess with piped stdin/stdout/stderr
  */
 /** Truthy PI_CLAUDE_CLI_HERMETIC opts in to hermetic mode (see README). */
@@ -70,7 +71,8 @@ export function spawnClaude(
   options?: {
     cwd?: string;
     signal?: AbortSignal;
-    effort?: string;
+    /** The thinking this process starts with; see src/thinking-config.ts. */
+    thinking?: CliThinking;
     mcpConfigPath?: string;
     resumeSessionId?: string;
     newSessionId?: string;
@@ -204,8 +206,11 @@ export function spawnClaude(
     args.push("--settings", settingsPath);
   }
 
-  if (options?.effort) {
-    args.push("--effort", options.effort);
+  // A later turn may change these on the live process through control
+  // requests (CliProcess.applyThinking), so they are the starting point, not
+  // part of what makes a process reusable.
+  if (options?.thinking) {
+    args.push(...thinkingSpawnArgs(options.thinking));
   }
 
   if (options?.mcpConfigPath) {

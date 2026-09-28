@@ -22,6 +22,7 @@ import {
 import { startHandoffBroker, stopHandoffBroker } from "./src/handoff-broker.js";
 import { cleanupRuntimeDir } from "./src/runtime-dir.js";
 import { retireAllCliProcesses } from "./src/cli-process.js";
+import { cliThinkingLevelMap } from "./src/thinking-config.js";
 import { rewriteOverflowMessage } from "./src/overflow.js";
 import { buildRateLimitPayload, rateLimitIdentity } from "./src/rate-limit.js";
 import type { TaskTrackerState } from "./src/types.js";
@@ -204,12 +205,13 @@ export default function (pi: ExtensionAPI) {
       cost: model.cost,
       contextWindow: model.contextWindow,
       maxTokens: model.maxTokens,
-      // pi's thinking selector only offers xhigh/max when the model's
-      // thinkingLevelMap declares them (getSupportedThinkingLevels in pi-ai);
-      // without this, every model is capped at "high" in the UI. The mapped
-      // values are unused by this provider — effort is derived from
-      // options.reasoning in mapThinkingEffort.
-      thinkingLevelMap: { xhigh: "xhigh", max: "max" },
+      // pi's own per-model map, less `minimal` on adaptive models (it would
+      // send what `low` sends), so the selector offers only levels the model
+      // has, and each maps to the effort pi uses (resolveCliThinking reads
+      // it). It used to be widened to { xhigh, max } for every model, which
+      // offered xhigh/max on budget models that ignore effort, xhigh on
+      // Opus/Sonnet 4.6, and `off` on models whose thinking cannot be off.
+      thinkingLevelMap: cliThinkingLevelMap(model),
     }));
 
     // Never change pi's active tools simply because this provider is installed.

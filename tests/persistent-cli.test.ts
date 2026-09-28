@@ -579,6 +579,233 @@ describe("persistent CLI process", () => {
     });
   });
 
+  describe("thinking changes mid-session", () => {
+    const after = (args: string[], flag: string) =>
+      args.indexOf(flag) === -1 ? undefined : args[args.indexOf(flag) + 1];
+    const wire = (proc: any) => written(proc).map((w: string) => JSON.parse(w));
+    /** Our own thinking controls (never the CLI's permission answers). */
+    const ours = (proc: any) =>
+      wire(proc).filter(
+        (m: any) =>
+          m.type === "control_request" &&
+          String(m.request_id).startsWith("pcc-"),
+      );
+    /** Acknowledge each control as it arrives; the provider sends them in order. */
+    const ackAll = async (proc: any, subtype = "success") => {
+      const answered = new Set<string>();
+      for (let i = 0; i < 5; i++) {
+        await vi.advanceTimersByTimeAsync(0);
+        for (const c of ours(proc)) {
+          if (answered.has(c.request_id)) continue;
+          answered.add(c.request_id);
+          proc.stdout.write(
+            line({
+              type: "control_response",
+              response: { subtype, request_id: c.request_id },
+            }),
+          );
+        }
+      }
+      await vi.advanceTimersByTimeAsync(0);
+    };
+    const finishTurn = async (proc: any, t: string) => {
+      proc.stdout.write(
+        startCycle({ input_tokens: 1 }) +
+          text(t) +
+          endCycle("end_turn") +
+          result({}),
+      );
+      await vi.advanceTimersByTimeAsync(10);
+    };
+    /** Turn 1 at `level`, finished; returns the history for turn 2. */
+    const firstTurn = async (session: string, level: any) => {
+      const ctx = { messages: [{ role: "user", content: "first" }] };
+      streamViaCli(model, ctx, opts(session, { reasoning: level }) as any);
+      await vi.advanceTimersByTimeAsync(0);
+      await finishTurn(procAt(0), "one");
+      return [
+        ...ctx.messages,
+        ourAssistant(doneOf(0).message.content),
+        { role: "user", content: "second" },
+      ];
+    };
+
+    it("applies a new level to the warm process before the next user message", async () => {
+      delete process.env.PI_CLAUDE_CLI_CONTEXT;
+      const messages = await firstTurn("think-1", "medium");
+      expect(after(spawnArgs(0), "--effort")).toBe("medium");
+      expect(after(spawnArgs(0), "--max-thinking-tokens")).toBe("8192");
+
+      streamViaCli(
+        model,
+        { messages },
+        opts("think-1", {
+          reasoning: "high",
+        }) as any,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      // Nothing is written to the CLI's turn until the change is acknowledged.
+      expect(
+        wire(procAt(0)).filter((m: any) => m.type === "user"),
+      ).toHaveLength(1);
+      await ackAll(procAt(0));
+
+      expect(spawn).toHaveBeenCalledTimes(1);
+      const lines = wire(procAt(0));
+      expect(ours(procAt(0)).map((c: any) => c.request)).toEqual([
+        {
+          subtype: "set_max_thinking_tokens",
+          max_thinking_tokens: 16384,
+          thinking_display: "summarized",
+        },
+        { subtype: "apply_flag_settings", settings: { effortLevel: "high" } },
+      ]);
+      const lastControl = lines.lastIndexOf(ours(procAt(0))[1]);
+      const secondUser = lines.findLastIndex((m: any) => m.type === "user");
+      expect(secondUser).toBeGreaterThan(lastControl);
+      await finishTurn(procAt(0), "two");
+      expect(doneOf(1).message.stopReason).toBe("stop");
+    });
+
+    it("turns thinking off mid-session without a respawn", async () => {
+      delete process.env.PI_CLAUDE_CLI_CONTEXT;
+      const messages = await firstTurn("think-2", "medium");
+      streamViaCli(model, { messages }, opts("think-2") as any); // pi's off
+      await ackAll(procAt(0));
+      expect(spawn).toHaveBeenCalledTimes(1);
+      expect(ours(procAt(0)).map((c: any) => c.request)).toEqual([
+        { subtype: "set_max_thinking_tokens", max_thinking_tokens: 0 },
+      ]);
+      await finishTurn(procAt(0), "two");
+      expect(doneOf(1).message.stopReason).toBe("stop");
+    });
+
+    it("writes no controls when the level did not change", async () => {
+      delete process.env.PI_CLAUDE_CLI_CONTEXT;
+      const messages = await firstTurn("think-3", "low");
+      streamViaCli(
+        model,
+        { messages },
+        opts("think-3", {
+          reasoning: "low",
+        }) as any,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(ours(procAt(0))).toHaveLength(0);
+      expect(
+        wire(procAt(0)).filter((m: any) => m.type === "user"),
+      ).toHaveLength(2);
+    });
+
+    it("spawns with the new flags when the live process refuses the change", async () => {
+      delete process.env.PI_CLAUDE_CLI_CONTEXT;
+      const messages = await firstTurn("think-4", "medium");
+      streamViaCli(
+        model,
+        { messages },
+        opts("think-4", {
+          reasoning: "high",
+        }) as any,
+      );
+      await ackAll(procAt(0), "error");
+      await vi.advanceTimersByTimeAsync(600);
+      expect(spawn).toHaveBeenCalledTimes(2);
+      expect(procAt(0).stdin.end).toHaveBeenCalled();
+      expect(after(spawnArgs(1), "--effort")).toBe("high");
+      expect(after(spawnArgs(1), "--max-thinking-tokens")).toBe("16384");
+      expect(written(procAt(1)).join("")).toContain("second");
+      await finishTurn(procAt(1), "two");
+      expect(doneOf(1).message.stopReason).toBe("stop");
+    });
+
+    it("keeps a handoff's turn as is; the change lands on the next user turn", async () => {
+      delete process.env.PI_CLAUDE_CLI_CONTEXT;
+      const ctx1 = { messages: [{ role: "user", content: "search please" }] };
+      streamViaCli(
+        model,
+        ctx1,
+        opts("think-5", { reasoning: "medium" }) as any,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      const proc = procAt(0);
+      proc.stdout.write(
+        startCycle({ input_tokens: 1 }) +
+          handoffToolUse("toolu_t", "mcp__custom-tools__search", { q: "x" }) +
+          endCycle("tool_use"),
+      );
+      await vi.advanceTimersByTimeAsync(10);
+      const done1 = doneOf(0);
+      const answers: HandoffResult[] = [];
+      dispatchHandoffCall(cliIdOf(0), {
+        toolUseId: "toolu_t",
+        name: "search",
+        arguments: { q: "x" },
+        respond: (r) => answers.push(r),
+      });
+      const ctx2 = {
+        messages: [
+          ...ctx1.messages,
+          ourAssistant(done1.message.content),
+          {
+            role: "toolResult",
+            toolCallId: "toolu_t",
+            toolName: "search",
+            content: [{ type: "text", text: "hits" }],
+            isError: false,
+          },
+        ],
+      };
+      // The level changed while the tool ran.
+      streamViaCli(model, ctx2, opts("think-5", { reasoning: "high" }) as any);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(spawn).toHaveBeenCalledTimes(1);
+      expect(answers).toHaveLength(1);
+      expect(ours(proc)).toHaveLength(0);
+      await finishTurn(proc, "found");
+      expect(doneOf(1).message.stopReason).toBe("stop");
+
+      const ctx3 = {
+        messages: [
+          ...ctx2.messages,
+          ourAssistant(doneOf(1).message.content),
+          { role: "user", content: "and then?" },
+        ],
+      };
+      streamViaCli(model, ctx3, opts("think-5", { reasoning: "high" }) as any);
+      await ackAll(proc);
+      expect(spawn).toHaveBeenCalledTimes(1);
+      expect(ours(proc).map((c: any) => c.request.subtype)).toEqual([
+        "set_max_thinking_tokens",
+        "apply_flag_settings",
+      ]);
+    });
+
+    it("applies the change in place under the legacy policy too", async () => {
+      const ctx1 = { messages: [{ role: "user", content: "first" }] };
+      streamViaCli(model, ctx1, opts("think-6", { reasoning: "high" }) as any);
+      await vi.advanceTimersByTimeAsync(0);
+      await finishTurn(procAt(0), "one");
+      const ctx2 = {
+        messages: [
+          ...ctx1.messages,
+          ourAssistant(doneOf(0).message.content),
+          { role: "user", content: "second" },
+        ],
+      };
+      streamViaCli(model, ctx2, opts("think-6", { reasoning: "low" }) as any);
+      await ackAll(procAt(0));
+      expect(spawn).toHaveBeenCalledTimes(1);
+      expect(ours(procAt(0)).map((c: any) => c.request)).toEqual([
+        {
+          subtype: "set_max_thinking_tokens",
+          max_thinking_tokens: 2048,
+          thinking_display: "summarized",
+        },
+        { subtype: "apply_flag_settings", settings: { effortLevel: "low" } },
+      ]);
+    });
+  });
+
   describe("turn continuation", () => {
     it("writes the next user turn to the parked process instead of spawning", async () => {
       const ctx1 = { messages: [{ role: "user", content: "first" }] };

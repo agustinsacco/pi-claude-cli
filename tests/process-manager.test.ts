@@ -165,60 +165,54 @@ describe("spawnClaude", () => {
   });
 });
 
-describe("effort flag", () => {
+describe("thinking flags", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it("includes --effort and high in args when effort is high", () => {
-    spawnClaude("claude-sonnet-4-5-20250929", undefined, { effort: "high" });
-    const args = (spawn as any).mock.calls[0][1] as string[];
+  const argsOf = () => (spawn as any).mock.calls[0][1] as string[];
+  const after = (args: string[], flag: string) => args[args.indexOf(flag) + 1];
 
-    expect(args).toContain("--effort");
-    const idx = args.indexOf("--effort");
-    expect(args[idx + 1]).toBe("high");
-  });
-
-  it("includes --effort and max in args when effort is max", () => {
-    spawnClaude("claude-opus-4-6-20260301", undefined, { effort: "max" });
-    const args = (spawn as any).mock.calls[0][1] as string[];
-
-    expect(args).toContain("--effort");
-    const idx = args.indexOf("--effort");
-    expect(args[idx + 1]).toBe("max");
-  });
-
-  it("includes --effort and low in args when effort is low", () => {
-    spawnClaude("claude-sonnet-4-5-20250929", undefined, { effort: "low" });
-    const args = (spawn as any).mock.calls[0][1] as string[];
-
-    expect(args).toContain("--effort");
-    const idx = args.indexOf("--effort");
-    expect(args[idx + 1]).toBe("low");
-  });
-
-  it("does NOT include --effort when effort is undefined", () => {
-    spawnClaude("claude-sonnet-4-5-20250929", undefined, { cwd: "/some/path" });
-    const args = (spawn as any).mock.calls[0][1] as string[];
-
-    expect(args).not.toContain("--effort");
-  });
-
-  it("does NOT include --effort when options is undefined", () => {
-    spawnClaude("claude-sonnet-4-5-20250929");
-    const args = (spawn as any).mock.calls[0][1] as string[];
-
-    expect(args).not.toContain("--effort");
-  });
-
-  it("is backward compatible - existing calls without effort still work", () => {
-    spawnClaude("claude-sonnet-4-5-20250929", "system prompt", {
-      cwd: "/path",
+  it("starts an enabled level with its budget, effort and display", () => {
+    spawnClaude("claude-sonnet-5", undefined, {
+      thinking: {
+        kind: "enabled",
+        budgetTokens: 8192,
+        effort: "medium",
+        display: "summarized",
+      },
     });
-    const args = (spawn as any).mock.calls[0][1] as string[];
+    const args = argsOf();
+    expect(after(args, "--max-thinking-tokens")).toBe("8192");
+    expect(after(args, "--effort")).toBe("medium");
+    expect(after(args, "--thinking-display")).toBe("summarized");
+    expect(args).not.toContain("--thinking");
+  });
 
-    expect(args).toContain("--append-system-prompt-file");
+  it("starts pi's off with thinking disabled and no budget or effort", () => {
+    spawnClaude("claude-haiku-4-5", undefined, {
+      thinking: { kind: "disabled" },
+    });
+    const args = argsOf();
+    expect(after(args, "--thinking")).toBe("disabled");
+    expect(args).not.toContain("--max-thinking-tokens");
     expect(args).not.toContain("--effort");
+    expect(args).not.toContain("--thinking-display");
+  });
+
+  it("passes no thinking flags for the CLI default or when none is given", () => {
+    spawnClaude("claude-opus-5", undefined, { thinking: { kind: "default" } });
+    spawnClaude("claude-opus-5", "system prompt", { cwd: "/path" });
+    for (const call of (spawn as any).mock.calls) {
+      const args = call[1] as string[];
+      for (const flag of [
+        "--thinking",
+        "--max-thinking-tokens",
+        "--effort",
+        "--thinking-display",
+      ])
+        expect(args).not.toContain(flag);
+    }
   });
 });
 
@@ -476,10 +470,15 @@ describe("mcp-config flag", () => {
     expect(args).not.toContain("--strict-mcp-config");
   });
 
-  it("backward compatibility - existing calls with only effort/cwd still work", () => {
+  it("backward compatibility - existing calls with only thinking/cwd still work", () => {
     spawnClaude("claude-sonnet-4-5-20250929", "system prompt", {
       cwd: "/path",
-      effort: "high",
+      thinking: {
+        kind: "enabled",
+        budgetTokens: 16384,
+        effort: "high",
+        display: "summarized",
+      },
     });
     const args = (spawn as any).mock.calls[0][1] as string[];
 
@@ -642,7 +641,12 @@ describe("resume session flag", () => {
   it("includes both --resume and --effort when both are provided", () => {
     spawnClaude("claude-sonnet-4-5-20250929", undefined, {
       resumeSessionId: "session-abc",
-      effort: "high",
+      thinking: {
+        kind: "enabled",
+        budgetTokens: 16384,
+        effort: "high",
+        display: "summarized",
+      },
     });
     const args = (spawn as any).mock.calls[0][1] as string[];
 

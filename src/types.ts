@@ -236,12 +236,27 @@ export interface ClaudeControlRequest {
   };
 }
 
+/**
+ * The CLI's answer to a control request WE sent (an interrupt, a thinking
+ * change). Claude Code 2.x nests `request_id` inside `response`.
+ */
+export interface ClaudeControlResponse {
+  type: "control_response";
+  response: {
+    subtype: "success" | "error";
+    request_id: string;
+    error?: string;
+    response?: unknown;
+  };
+}
+
 export type NdjsonMessage =
   | ClaudeStreamEventMessage
   | ClaudeResultMessage
   | ClaudeSystemMessage
   | ClaudeTaskEvent
   | ClaudeControlRequest
+  | ClaudeControlResponse
   | ClaudeAssistantEnvelope
   | ClaudeUserEnvelope
   | ClaudeRateLimitEvent;
