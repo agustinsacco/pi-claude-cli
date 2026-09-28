@@ -186,8 +186,18 @@ export function defaultSocketPath(): string {
  */
 const MAX_REQUEST_BYTES = 8 * 1024 * 1024;
 
-/** A connected peer that sends nothing usable is dropped rather than kept. */
-const REQUEST_TIMEOUT_MS = 60_000;
+/**
+ * A connected peer that sends no complete request in this long is dropped.
+ *
+ * It bounds the REQUEST, never the call: once a request line has arrived the
+ * timer stops, because what follows is pi running the tool, and that takes as
+ * long as the tool takes. Under pi context every tool comes through here,
+ * `bash` included, and a build or test suite runs for minutes. Before this
+ * was scoped, any tool slower than a minute lost its connection and the model
+ * read "pi closed the connection without a result" while pi recorded the real
+ * output, so the CLI's history and pi's disagreed about what the tool said.
+ */
+export const HANDOFF_REQUEST_TIMEOUT_MS = 60_000;
 
 interface IncomingCall {
   session: string;
@@ -224,9 +234,10 @@ function parseIncoming(line: string): IncomingCall | undefined {
 function handleConnection(socket: Socket): void {
   let buffer = "";
   let handled = false;
+  let requested = false;
   const timer = setTimeout(() => {
     if (!handled) socket.destroy();
-  }, REQUEST_TIMEOUT_MS);
+  }, HANDOFF_REQUEST_TIMEOUT_MS);
   timer.unref?.();
   const finish = (result: HandoffResult) => {
     if (handled) return;
@@ -240,7 +251,7 @@ function handleConnection(socket: Socket): void {
   };
   socket.setEncoding("utf8");
   socket.on("data", (chunk: string) => {
-    if (handled) return;
+    if (handled || requested) return;
     buffer += chunk;
     const nl = buffer.indexOf("\n");
     if (nl === -1) {
@@ -253,6 +264,10 @@ function handleConnection(socket: Socket): void {
     }
     const line = buffer.slice(0, nl);
     buffer = "";
+    // One request per connection. From here on the peer is waiting for pi,
+    // not idle, so the request timer no longer applies.
+    requested = true;
+    clearTimeout(timer);
     const incoming = parseIncoming(line);
     if (!incoming) {
       finish(errorResult("malformed handoff request"));

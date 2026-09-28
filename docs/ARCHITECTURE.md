@@ -526,6 +526,16 @@ time; within one process it never does.
   `tool_use` ids, so it could never answer one. It now gets an error rather
   than a stall.
 
+  A connection that sends no complete request within a minute is dropped
+  (`HANDOFF_REQUEST_TIMEOUT_MS`). That bounds the request, not the call: once
+  the request line arrives, the call stays open for as long as pi runs the
+  tool, bounded only by the CLI's `MCP_TOOL_TIMEOUT` (an hour by default) and
+  `PI_CLAUDE_CLI_HANDOFF_WAIT_MS`. Before 0.9.1 the timer kept running after
+  the request, and under pi context every tool comes through here, `bash`
+  included. So any tool slower than a minute (a build, a test suite) returned
+  "pi closed the connection without a result" to the model while pi recorded
+  the real output, and the next call usually had to respawn the process.
+
 - **Across turns.** After `result` the process is parked
   (`PI_CLAUDE_CLI_KEEPALIVE_MS`, default 10 min). The next call whose delta
   is a user message writes it to the same stdin. Verified live: a commit
