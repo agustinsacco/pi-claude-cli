@@ -1,6 +1,12 @@
 import { createHash } from "node:crypto";
 import * as ai from "@earendil-works/pi-ai";
 
+/** The system prompt as pi's collapsed system message: base text plus named sections. */
+export interface SystemState {
+  content: string;
+  sections: Record<string, string>;
+}
+
 /** Accept both pi's legacy Context and its system-message TranscriptContext. */
 export function piContext(context: {
   messages: any[];
@@ -8,6 +14,15 @@ export function piContext(context: {
   tools?: any[];
 }) {
   const transcript = context.messages.some((m) => m.role === "system");
+  const head = transcript
+    ? (ai as any).getCurrentSystemMessage(context.messages)
+    : undefined;
+  const system: SystemState = transcript
+    ? {
+        content: head ? (ai as any).contentText(head.content) : "",
+        sections: { ...(head?.sections ?? {}) },
+      }
+    : { content: context.systemPrompt ?? "", sections: {} };
   return {
     systemPrompt: transcript
       ? (ai as any).getCurrentSystemPrompt(context.messages)
@@ -16,12 +31,48 @@ export function piContext(context: {
       ? (ai as any).getCurrentTools(context.messages)
       : (context.tools ?? []),
     messages: context.messages.filter((m) => m.role !== "system"),
+    system,
   };
 }
 
-/** Compare model-visible history, not usage, timestamps, or provider signatures. */
+/**
+ * What changed in the system prompt since a live process was told `seen`, as
+ * a block for its next user message: "" when nothing did, undefined when the
+ * base text was rewritten rather than extended (only a fresh process can take
+ * that).
+ *
+ * The CLI fixes its system prompt at spawn, so a respawn was the only way to
+ * apply pi's mid-session updates (an MCP server list, the Swarm toggle, an
+ * edited AGENTS.md), and every one re-imported the conversation as cache
+ * write. pi's own API transports send such updates in place as a system
+ * message; this is the same update, rendered the same way, in the one place a
+ * live CLI takes new input.
+ */
+export function systemUpdate(
+  seen: SystemState,
+  now: SystemState,
+): string | undefined {
+  if (!now.content.startsWith(seen.content)) return undefined;
+  const sections: Record<string, string | null> = {};
+  for (const [name, text] of Object.entries(now.sections))
+    if (seen.sections[name] !== text) sections[name] = text;
+  for (const name of Object.keys(seen.sections))
+    if (!(name in now.sections)) sections[name] = null;
+  const appended = now.content.slice(seen.content.length).trim();
+  if (!appended && Object.keys(sections).length === 0) return "";
+  const render = (ai as any).renderSystemMessageUpdate;
+  if (typeof render !== "function") return undefined;
+  const text = render({ role: "system", content: appended, sections });
+  return `<system-reminder>\n${text}\n</system-reminder>`;
+}
+
+/**
+ * Compare model-visible history, not usage, timestamps, or provider signatures.
+ * A failed or aborted assistant message is not history: pi drops it before any
+ * request, so a process interrupted mid-reply still matches what comes next.
+ */
 export function historyHash(messages: any[]): string {
-  const visible = messages.map((m) => ({
+  const visible = messages.filter(isHistory).map((m) => ({
     role: m.role,
     content: Array.isArray(m.content)
       ? m.content
@@ -36,6 +87,13 @@ export function historyHash(messages: any[]): string {
     isError: m.isError,
   }));
   return createHash("sha256").update(JSON.stringify(visible)).digest("hex");
+}
+
+export function isHistory(m: any): boolean {
+  return !(
+    m?.role === "assistant" &&
+    (m.stopReason === "aborted" || m.stopReason === "error")
+  );
 }
 
 /** Import in order, including every image and tool result. Never replay thinking. */

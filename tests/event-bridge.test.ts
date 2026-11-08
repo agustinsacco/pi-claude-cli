@@ -222,6 +222,42 @@ describe("createEventBridge", () => {
       expect(output.usage.cacheRead).toBe(0);
       expect(output.usage.cacheWrite).toBe(0);
       expect(output.usage.totalTokens).toBe(50);
+      expect(output.usage.cacheWrite1h).toBeUndefined();
+    });
+
+    it("reports the 1h-TTL share of cache writes, which pi prices at 2x input", () => {
+      const bridge = createEventBridge(stream as any, model as any);
+      const cycle = (write: number, long: number) => {
+        bridge.handleEvent({
+          type: "message_start",
+          message: {
+            usage: {
+              input_tokens: 1,
+              cache_creation_input_tokens: write,
+              cache_creation: {
+                ephemeral_5m_input_tokens: write - long,
+                ephemeral_1h_input_tokens: long,
+              },
+            },
+          },
+        });
+      };
+      cycle(1000, 800);
+      expect(bridge.getOutput().usage.cacheWrite1h).toBe(800);
+      cycle(500, 500); // a second cycle of the same episode adds to it
+      expect(bridge.getOutput().usage).toMatchObject({
+        cacheWrite: 1500,
+        cacheWrite1h: 1300,
+      });
+      // The result's totals are authoritative; the share never exceeds them.
+      bridge.applyResult({
+        type: "result",
+        usage: { cache_creation_input_tokens: 900 },
+      } as any);
+      expect(bridge.getOutput().usage).toMatchObject({
+        cacheWrite: 900,
+        cacheWrite1h: 900,
+      });
     });
   });
 

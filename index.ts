@@ -116,7 +116,7 @@ function publishTaskProgress(state: TaskTrackerState): void {
 }
 
 /** Last staged schema, handed to every spawn; undefined until pi's registry is up. */
-let mcpSchema: { schemaPath: string; version: number } | undefined;
+let mcpSchema: { schemaPath: string; version: string } | undefined;
 
 /**
  * Stage pi's custom-tool schemas on first request, then keep them in step
@@ -132,9 +132,9 @@ let mcpSchema: { schemaPath: string; version: number } | undefined;
  * getAllTools() call and a string compare.
  *
  * The CLI reads the schema through --mcp-config at spawn, so a mid-session
- * change lands on the next spawn: the version bump retires a parked process
- * (its tool list is what it advertised at connect time) and the next call
- * resumes the CLI session in a fresh process.
+ * change lands on the next spawn: a different version retires a parked
+ * process (its tool list is what it advertised at connect time) and the next
+ * call imports pi's history into a fresh process.
  *
  * Uses warn-don't-block: failure logs a warning but does not
  * prevent the provider from functioning (built-ins still work).
@@ -142,7 +142,7 @@ let mcpSchema: { schemaPath: string; version: number } | undefined;
 function ensureMcpSchema(
   pi: ExtensionAPI,
   context: Parameters<typeof piContext>[0],
-): { schemaPath: string; version: number } | undefined {
+): { schemaPath: string; version: string } | undefined {
   try {
     // The request, not the registry, is authoritative: inactive tools stay inactive.
     const toolDefs = usesPiContext()

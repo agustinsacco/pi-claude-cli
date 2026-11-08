@@ -127,7 +127,7 @@ describe.skipIf(!LIVE)("live: persistent CLI process", () => {
     const opts = {
       sessionId: piSessionId,
       cwd,
-      mcpConfig: { schemaPath, version: 1, handoffSocket: socketPath },
+      mcpConfig: { schemaPath, version: "v1", handoffSocket: socketPath },
     };
     const before = processCount();
 
@@ -200,7 +200,7 @@ describe.skipIf(!LIVE)("live: persistent CLI process", () => {
       const opts = {
         sessionId: piSessionId,
         cwd,
-        mcpConfig: { schemaPath, version: 1, handoffSocket: socketPath },
+        mcpConfig: { schemaPath, version: "v1", handoffSocket: socketPath },
       };
       const ctx1 = {
         systemPrompt: "You are terse.",

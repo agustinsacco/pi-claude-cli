@@ -33,7 +33,7 @@ CI runs lint, formatting, typecheck, coverage and deterministic e2e on Linux, ma
 ## Invariants
 
 1. pi owns the prompt, active tools, complete tool results and compaction. Claude is a disposable process cache, not a second conversation ledger.
-2. A warm process may continue only when its acknowledged pi-history prefix and launch signature match. Context rewrites, model changes and compaction must not resume stale history.
+2. A warm process may continue only when its acknowledged pi-history prefix and launch signature match. Context rewrites, model changes and compaction must not resume stale history. System-prompt updates reach a live process as a `<system-reminder>` block, never by respawning; a call that is not the session's next step (`cacheRetention: "none"`, or foreign history during a handoff) must not touch the session's process.
 3. Handoffs return real pi toolCall blocks; the CLI waits for the matching pi result. Do not re-execute historical tools. Native tools are disabled by default; explicit legacy mode preserves marker behavior.
 4. Do not mutate another provider's active tools or auto-compaction setting. Provider switches clear parked processes and UI status.
 5. Default CLI sessions do not persist. Existing legacy archives remain available but are not used on the default path. Do not delete user archives as a cleanup shortcut.

@@ -25,7 +25,13 @@ Child-only environment disables independent CLAUDE.md/auto-memory discovery, cla
 
 A CLI process is a disposable cache, not another source of truth. After each successful provider episode, the provider records a hash and length of the pi history it acknowledged, including the emitted assistant message. It hashes model-visible content, excluding timestamps, usage and thinking signatures.
 
-Reuse requires an unchanged history prefix and launch signature. A tool handoff must also contain exactly the awaited tool results. Changed history, prompt or tools retire the process and import pi's current context in order. This covers native-provider turns, branch edits, compaction, extension context rewrites and process restarts. No stale saved prompt or CLI transcript is resumed. The thinking level is not part of the launch signature: a new level is applied to the live process through Claude Code's control requests before the next user turn, and only a refused change retires it ([ARCHITECTURE.md](ARCHITECTURE.md#thinking-the-same-request-pi-would-send-0100)).
+Reuse requires an unchanged history prefix and launch signature. A tool handoff must contain the awaited tool results, optionally followed by user messages pi sent while the tool ran (steering): those are written to the live process before the results, and Claude Code folds them into the same turn. Changed history, a rewritten base prompt or changed tools retire the process and import pi's current context in order.
+
+The system prompt is not part of the launch signature. A section change or appended text (an MCP server list, an extension's request-local patch) is rendered the way pi renders a mid-conversation system message, wrapped in `<system-reminder>`, and sent ahead of the next user message to the live process. A tool loop keeps the prompt it started on; the update rides with the next user input. Only a rewritten base prompt needs a fresh process.
+
+An aborted reply leaves the process warm: pi gets its aborted error at once, the CLI is interrupted, and the process parks once it settles (at most 5 seconds; a prompt that arrives first waits for it). A failed or aborted assistant message is not history, matching pi's own transports.
+
+A call that is not the session's next step never takes or retires the session's process: a call with `cacheRetention: "none"` (pi-web-access answers `fetch_content` this way, with the session's model and id), or one whose history does not extend a turn that is waiting on a tool. It runs on a process of its own, which is never parked. The MCP schema version is a content hash, so such a call's other tools do not make the session's own surface look changed. This covers native-provider turns, branch edits, compaction, extension context rewrites and process restarts. No stale saved prompt or CLI transcript is resumed. The thinking level is not part of the launch signature: a new level is applied to the live process through Claude Code's control requests before the next user turn, and only a refused change retires it ([ARCHITECTURE.md](ARCHITECTURE.md#thinking-the-same-request-pi-would-send-0100)).
 
 Model selection, session start/shutdown, tree navigation and compaction retire parked processes. Rate-limit and agent status are cleared on lifecycle resets. Old policy pairings and saved prompt sidecars are detached on the next pi-owned request; archived Claude transcripts are not deleted or read.
 
@@ -33,9 +39,9 @@ A CLI import uses ordered, role-labelled content because print mode does not acc
 
 ## Compaction and failure
 
-pi owns compaction and retry. Hosts must stop forcing `set_auto_compaction: false` for this provider. A compacted pi history invalidates the disposable Claude process before the next request. Errors and aborts return structured assistant errors, not raw strings or success messages; the existing overflow normalizer enables pi's recovery path.
+pi owns compaction and retry. Hosts must stop forcing `set_auto_compaction: false` for this provider. A compacted pi history invalidates the disposable Claude process before the next request. Errors and aborts return structured assistant errors, not raw strings or success messages (an abort no longer retires the process, see above); the existing overflow normalizer enables pi's recovery path.
 
-A stopped/failed process is not reused. Default runs write no Claude conversation file or resume sidecar. Temporary MCP configuration is removed on retirement/exit; prompt staging files are removed after an episode and the private runtime directory on pi exit. SIGKILL cannot run cleanup and may leave its private directory.
+A failed process is not reused. Default runs write no Claude conversation file or resume sidecar. Temporary MCP configuration is removed on retirement/exit; prompt staging files are removed after an episode and the private runtime directory on pi exit. SIGKILL cannot run cleanup and may leave its private directory.
 
 ## Verification
 

@@ -196,13 +196,21 @@ export function createEventBridge(
   // reset every cycle, so blocks are matched per-cycle; usage is summed
   // across cycles (each message_delta carries that cycle's final numbers).
   let cycle = -1;
-  const cumulativeUsage: Required<ClaudeUsage> = {
+  const cumulativeUsage: Required<Omit<ClaudeUsage, "cache_creation">> = {
     input_tokens: 0,
     output_tokens: 0,
     cache_read_input_tokens: 0,
     cache_creation_input_tokens: 0,
   };
   let cycleUsage: ClaudeUsage = {};
+  /**
+   * Banked 1h-TTL cache writes. Claude Code writes its prefix with a one-hour
+   * TTL, which pi prices at 2x input rather than the 1.25x of a five-minute
+   * write, so `cacheWrite` alone under-reports what a cold turn cost.
+   */
+  let longWrite = 0;
+  const longOf = (u: ClaudeUsage) =>
+    u.cache_creation?.ephemeral_1h_input_tokens ?? 0;
   /**
    * Context size of the most recent cycle — what the model actually saw on
    * its last call, which is NOT the episode's summed usage.
@@ -287,6 +295,11 @@ export function createEventBridge(
     output.usage.cacheWrite =
       cumulativeUsage.cache_creation_input_tokens +
       (cycleUsage.cache_creation_input_tokens ?? 0);
+    const long = Math.min(
+      longWrite + longOf(cycleUsage),
+      output.usage.cacheWrite,
+    );
+    if (long > 0) output.usage.cacheWrite1h = long;
     // Latch the newest cycle we have numbers for. `applyResult` clears
     // cycleUsage, so a zero here means "no fresher figure", never "empty
     // context" — the last latched value must survive.
@@ -347,6 +360,7 @@ export function createEventBridge(
           cycleUsage.cache_read_input_tokens ?? 0;
         cumulativeUsage.cache_creation_input_tokens +=
           cycleUsage.cache_creation_input_tokens ?? 0;
+        longWrite += longOf(cycleUsage);
         cycleUsage = {};
         cycle++;
         handleMessageStart(event);
@@ -662,6 +676,8 @@ export function createEventBridge(
       if (usage.cache_creation_input_tokens != null)
         cycleUsage.cache_creation_input_tokens =
           usage.cache_creation_input_tokens;
+      if (usage.cache_creation != null)
+        cycleUsage.cache_creation = usage.cache_creation;
       recomputeUsage();
     }
   }
@@ -812,6 +828,7 @@ export function createEventBridge(
         cycleUsage.cache_read_input_tokens ?? 0;
       cumulativeUsage.cache_creation_input_tokens +=
         cycleUsage.cache_creation_input_tokens ?? 0;
+      longWrite += longOf(cycleUsage);
       cycleUsage = {};
       lastCycleContext = meta.postTokens;
       recomputeUsage();
@@ -852,6 +869,7 @@ export function createEventBridge(
       cumulativeUsage.cache_creation_input_tokens =
         totals.cache_creation_input_tokens ??
         cumulativeUsage.cache_creation_input_tokens;
+      longWrite += longOf(cycleUsage);
       cycleUsage = {};
       recomputeUsage();
     }

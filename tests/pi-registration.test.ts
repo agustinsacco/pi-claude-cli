@@ -14,7 +14,7 @@ vi.mock("../src/mcp-config", () => ({
   getCustomToolDefs: vi.fn(),
   writeSchemaFile: vi.fn(() => ({
     schemaPath: "schema",
-    version: 1,
+    version: "v1",
     changed: false,
   })),
   cleanupMcpConfigFiles: vi.fn(),

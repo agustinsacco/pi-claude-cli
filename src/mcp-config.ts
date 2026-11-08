@@ -24,6 +24,7 @@
  * address the broker directly.
  */
 
+import { createHash } from "node:crypto";
 import { writeFileSync, unlinkSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -53,17 +54,21 @@ export interface McpConfigWrite {
   changed: boolean;
 }
 
-/** The staged schema file and how many times it has been rewritten. */
+/** The staged schema file and the surface it holds. */
 export interface SchemaFileWrite {
   schemaPath: string;
   changed: boolean;
-  /** Increments on every rewrite; 1 after the first write. */
-  version: number;
+  /**
+   * Content hash of the surface. A counter made every alternation look like a
+   * change: a side call with other tools (an extension's own model query
+   * during a tool) bumped it, and the session's next call then retired a
+   * process whose tools had never changed.
+   */
+  version: string;
 }
 
 /** Serialized tool defs as of the last write, for change detection. */
 let lastSchemaJson: string | undefined;
-let schemaVersion = 0;
 /** The legacy per-process config file's content never varies: written once. */
 let configWritten = false;
 /** Per-session config files this process wrote, for exit cleanup. */
@@ -128,9 +133,13 @@ export function writeSchemaFile(toolDefs: McpToolDef[]): SchemaFileWrite {
   if (changed) {
     writeFileSync(schemaFilePath(), schemaJson, { mode: RUNTIME_FILE_MODE });
     lastSchemaJson = schemaJson;
-    schemaVersion++;
   }
-  return { schemaPath: schemaFilePath(), changed, version: schemaVersion };
+  const version = createHash("sha256").update(schemaJson).digest("hex");
+  return {
+    schemaPath: schemaFilePath(),
+    changed,
+    version: version.slice(0, 16),
+  };
 }
 
 /**
@@ -231,7 +240,6 @@ export function cleanupMcpConfigFiles(): void {
 /** Test seam: forget what this process has already written. */
 export function resetMcpConfigCache(): void {
   lastSchemaJson = undefined;
-  schemaVersion = 0;
   configWritten = false;
   sessionConfigPaths.clear();
 }

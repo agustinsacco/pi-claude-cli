@@ -508,16 +508,21 @@ describe("writeSessionMcpConfig", () => {
     expect(mocks.unlinkSync).toHaveBeenCalledWith(b);
   });
 
-  it("writeSchemaFile bumps the version only when the surface changes", async () => {
+  it("writeSchemaFile names the surface, so going back to one is no change", async () => {
     const { writeSchemaFile } = await import("../src/mcp-config");
     const defs = (d: string): McpToolDef[] => [
       { name: "t", description: d, inputSchema: {} },
     ];
     const a = writeSchemaFile(defs("one"));
     const b = writeSchemaFile(defs("one"));
+    // A side call with other tools in between (an extension's own model
+    // query) must not make the session's own surface look new afterwards.
     const c = writeSchemaFile(defs("two"));
-    expect(a).toMatchObject({ changed: true, version: 1 });
-    expect(b).toMatchObject({ changed: false, version: 1 });
-    expect(c).toMatchObject({ changed: true, version: 2 });
+    const d = writeSchemaFile(defs("one"));
+    expect(a.changed).toBe(true);
+    expect(b).toEqual({ ...a, changed: false });
+    expect(c.changed).toBe(true);
+    expect(c.version).not.toBe(a.version);
+    expect(d.version).toBe(a.version);
   });
 });
