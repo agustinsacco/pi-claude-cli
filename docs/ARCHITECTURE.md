@@ -127,9 +127,13 @@ usage reported roughly one cycle, and the final answer could be lost.
 
 `usage.input/output/cacheRead/cacheWrite` are **cumulative across cycles** —
 that is what the account is charged for. `usage.totalTokens` is **not their
-sum**: it carries the _last_ cycle's prompt size
-(`input + cache_read + cache_creation`), because that is the only figure that
-describes the conversation the model is actually holding.
+sum**: it carries the _last_ cycle's size, its prompt
+(`input + cache_read + cache_creation`) plus its reply (`output`), because that
+is the only figure that describes the conversation the model is actually
+holding. It is the figure pi's own Anthropic provider reports. Before 0.11.0
+the reply was left out, so in a tool loop, where the next request carries it,
+pi's budget check lagged by a whole thinking turn (20-53k tokens let requests
+through at 401k and 415k on a 400k budget).
 
 The distinction is load-bearing, not cosmetic. pi's
 `calculateContextTokens()` short-circuits on `totalTokens` and feeds it to
@@ -143,7 +147,7 @@ same cached prefix, so the sum counts that prefix once per cycle:
 | cycle 2 prompt           | 28,243 |
 | **summed usage**         | 82,174 |
 
-The model never held more than 28,243. Reporting 82,174 showed 41% of a 200k
+The model never held more than 28,243 plus a reply. Reporting 82,174 showed 41% of a 200k
 window instead of 14%, and a long turn (26 cycles was observed in the wild,
 summing to 2.08M against a real 104k) pushed pi past its compaction threshold
 at a tenth of true occupancy — discarding history the window had ample room

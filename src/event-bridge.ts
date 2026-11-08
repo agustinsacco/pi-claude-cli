@@ -225,7 +225,11 @@ export function createEventBridge(
    * crossed pi's compaction threshold at a fraction of true occupancy.
    *
    * So the four component figures stay cumulative — they are what gets
-   * billed — and `totalTokens` carries the last cycle's context instead.
+   * billed — and `totalTokens` carries the last cycle's context instead:
+   * its prompt plus its reply, the figure pi's Anthropic provider reports.
+   * Leaving the reply out under-counted by a whole thinking turn in a tool
+   * loop, where the next request carries it (20-53k let requests through at
+   * 415k on a 400k budget).
    */
   let lastCycleContext = 0;
   /**
@@ -304,7 +308,8 @@ export function createEventBridge(
     // cycleUsage, so a zero here means "no fresher figure", never "empty
     // context" — the last latched value must survive.
     const cycleContext = contextOf(cycleUsage);
-    if (cycleContext > 0) lastCycleContext = cycleContext;
+    if (cycleContext > 0)
+      lastCycleContext = cycleContext + (cycleUsage.output_tokens ?? 0);
     output.usage.totalTokens =
       lastCycleContext > 0
         ? lastCycleContext

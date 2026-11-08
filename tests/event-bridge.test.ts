@@ -293,9 +293,9 @@ describe("createEventBridge", () => {
 
       const output = bridge.getOutput();
       expect(output.usage.output).toBe(42);
-      // totalTokens is the cycle's PROMPT (what pi reads as context), so the
-      // 42 output tokens are billed but do not occupy the window.
-      expect(output.usage.totalTokens).toBe(100);
+      // totalTokens is the context after the reply, as pi's own Anthropic
+      // provider reports it: the next request carries those 42 tokens too.
+      expect(output.usage.totalTokens).toBe(142);
     });
   });
 
