@@ -77,6 +77,8 @@ export function spawnClaude(
     resumeSessionId?: string;
     newSessionId?: string;
     systemPromptMode?: SystemPromptMode;
+    /** The prompt-cache lifetime to ask for; unset leaves the CLI's default. */
+    cacheTtl?: "5m" | "1h";
   },
 ): ChildProcess {
   const piContext = usesPiContext();
@@ -246,6 +248,7 @@ export function spawnClaude(
       ENABLE_TOOL_SEARCH: "false",
     });
   }
+  if (options?.cacheTtl) env.CLAUDE_CODE_PROMPT_CACHE_TTL = options.cacheTtl;
   if (!env.MCP_TOOL_TIMEOUT)
     env.MCP_TOOL_TIMEOUT = String(DEFAULT_MCP_TOOL_TIMEOUT_MS);
 

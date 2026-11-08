@@ -612,7 +612,9 @@ time; within one process it never does.
   the real output, and the next call usually had to respawn the process.
 
 - **Across turns.** After `result` the process is parked
-  (`PI_CLAUDE_CLI_KEEPALIVE_MS`, default 10 min). The next call whose delta
+  (`PI_CLAUDE_CLI_KEEPALIVE_MS`, default 10 min; at most 5 min for a
+  request whose retention is `short`, as its cache entry lives no longer).
+  The next call whose delta
   is a user message writes it to the same stdin. Verified live: a commit
   between turns costs 91 write tokens on the parked process, 8,827 on a fresh
   one (`tests/live-persistent.test.ts`).

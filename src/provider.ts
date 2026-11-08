@@ -189,6 +189,24 @@ function keepaliveMs(): number {
   return Number.isFinite(n) && n > 0 ? n : DEFAULT_KEEPALIVE_MS;
 }
 
+/** How long a five-minute cache entry lives, and so a process worth parking. */
+const SHORT_CACHE_MS = 5 * 60_000;
+
+/**
+ * The cache lifetime pi asked for, resolved as its own providers resolve it
+ * (`cacheRetention`, else `PI_CACHE_RETENTION`), or undefined to leave it to
+ * the CLI: an hour on a subscription, five minutes on an API key. pi-subagents
+ * asks for `short` on a child's requests (PI_SUBAGENT_CACHE_RETENTION), the
+ * split Claude Code makes between a conversation and its sub-agents: a child
+ * rarely idles, so an hour-long entry is a 2x write it never claims.
+ */
+function cacheTtl(options?: SimpleStreamOptions): "5m" | "1h" | undefined {
+  const retention =
+    options?.cacheRetention ??
+    (options?.env?.PI_CACHE_RETENTION || process.env.PI_CACHE_RETENTION);
+  return retention === "short" ? "5m" : retention === "long" ? "1h" : undefined;
+}
+
 /**
  * How long an interrupted CLI gets to emit its `result` after pi aborts. It
  * answers in well under a second; past this the process is retired.
@@ -384,6 +402,7 @@ export function streamViaCli(
 ): AssistantMessageEventStream {
   const stream = createAssistantMessageEventStream();
   const piOwned = usesPiContext();
+  const ttl = cacheTtl(options);
   // pi 0.86+ sends its prompt and tools as system messages and leaves
   // systemPrompt empty. Both policies read the current ones from there.
   const normalized = normalizePiContext(context);
@@ -482,6 +501,7 @@ export function streamViaCli(
         autocompact ?? null,
         allowHandoff,
         process.env.PI_CLAUDE_CLI_SETTINGS ?? null,
+        ttl ?? null,
       ]);
 
       // ---- 1. Reuse the session's parked process when this call continues it
@@ -630,6 +650,7 @@ export function streamViaCli(
           resumeSessionId,
           newSessionId: newCliId,
           systemPromptMode,
+          cacheTtl: ttl,
         });
         // Record the mapping as soon as the session exists on disk. On a turn
         // that later errors, the mapping is cleared so the next turn reimports.
@@ -756,7 +777,11 @@ export function streamViaCli(
           parkCliProcess(sessionKey, live, HANDOFF_WAIT_MS);
           return;
         }
-        const idle = keepaliveMs();
+        // Parked past its cache entry, a process saves nothing.
+        const idle =
+          ttl === "5m"
+            ? Math.min(keepaliveMs(), SHORT_CACHE_MS)
+            : keepaliveMs();
         if (idle > 0) parkCliProcess(sessionKey, live, idle);
         else void live.retire();
       }

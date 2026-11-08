@@ -439,4 +439,53 @@ describe("cache continuity", () => {
       expect(textOf(userWrites(procAt(0)).at(-1))).toContain("second");
     });
   });
+
+  describe("cache lifetime", () => {
+    const ttlOf = (i: number) =>
+      (spawn as any).mock.calls[i][2].env.CLAUDE_CODE_PROMPT_CACHE_TTL;
+    async function turn(extra: any) {
+      streamViaCli(
+        model,
+        { messages: [{ role: "user", content: "hi" }] },
+        opts(extra) as any,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      procAt(0).stdout.write(reply("hello") + endTurn);
+      await settle();
+    }
+    beforeEach(() => {
+      delete process.env.PI_CACHE_RETENTION;
+      delete process.env.CLAUDE_CODE_PROMPT_CACHE_TTL;
+      process.env.PI_CLAUDE_CLI_KEEPALIVE_MS = "3600000";
+    });
+    afterEach(() => delete process.env.PI_CACHE_RETENTION);
+
+    it.each([
+      // pi-subagents pins this on an in-process child's requests.
+      ["a sub-agent's", { env: { PI_CACHE_RETENTION: "short" } }, "", "5m"],
+      ["a spawned sub-agent's", {}, "short", "5m"],
+      ["an explicit long", { cacheRetention: "long" }, "", "1h"],
+      ["no", {}, "", undefined],
+    ])(
+      "asks the CLI for the cache lifetime pi asked for (%s retention)",
+      async (_name, extra, processEnv, ttl) => {
+        if (processEnv) process.env.PI_CACHE_RETENTION = processEnv;
+        await turn(extra);
+        expect(ttlOf(0)).toBe(ttl);
+      },
+    );
+
+    it("parks a short-retention process only while its cache lives", async () => {
+      await turn({ env: { PI_CACHE_RETENTION: "short" } });
+      expect(parkedCliProcessCount()).toBe(1);
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      expect(parkedCliProcessCount()).toBe(0);
+    });
+
+    it("keeps the host's keepalive when no retention was asked for", async () => {
+      await turn({});
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      expect(parkedCliProcessCount()).toBe(1);
+    });
+  });
 });
