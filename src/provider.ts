@@ -69,6 +69,7 @@ import { writeSessionMcpConfig, removeSessionMcpConfig } from "./mcp-config.js";
 import {
   CliProcess,
   parkCliProcess,
+  peekParkedCliProcess,
   takeParkedCliProcess,
   addUsage,
   subUsage,
@@ -83,7 +84,9 @@ import { randomUUID } from "node:crypto";
 import {
   piContext as normalizePiContext,
   historyHash,
+  isHistory,
   replayPiMessages,
+  systemUpdate,
 } from "./pi-context.js";
 
 /**
@@ -186,6 +189,38 @@ function keepaliveMs(): number {
   return Number.isFinite(n) && n > 0 ? n : DEFAULT_KEEPALIVE_MS;
 }
 
+/** How long a five-minute cache entry lives, and so a process worth parking. */
+const SHORT_CACHE_MS = 5 * 60_000;
+
+/**
+ * The cache lifetime pi asked for, resolved as its own providers resolve it
+ * (`cacheRetention`, else `PI_CACHE_RETENTION`), or undefined to leave it to
+ * the CLI: an hour on a subscription, five minutes on an API key. pi-subagents
+ * asks for `short` on a child's requests (PI_SUBAGENT_CACHE_RETENTION), the
+ * split Claude Code makes between a conversation and its sub-agents: a child
+ * rarely idles, so an hour-long entry is a 2x write it never claims.
+ */
+function cacheTtl(options?: SimpleStreamOptions): "5m" | "1h" | undefined {
+  const retention =
+    options?.cacheRetention ??
+    (options?.env?.PI_CACHE_RETENTION || process.env.PI_CACHE_RETENTION);
+  return retention === "short" ? "5m" : retention === "long" ? "1h" : undefined;
+}
+
+/**
+ * How long an interrupted CLI gets to emit its `result` after pi aborts. It
+ * answers in well under a second; past this the process is retired.
+ */
+const ABORT_GRACE_MS = 5_000;
+
+/**
+ * Sessions whose process is still settling an abort. pi is idle the moment
+ * it has its answer, so the next prompt can arrive before the interrupt's
+ * `result`; it waits for the process (at most ABORT_GRACE_MS) instead of
+ * spawning a cold one.
+ */
+const settling = new Map<string, Promise<void>>();
+
 /**
  * Ceiling on a process blocked in a proxied handoff with no pi call coming
  * back (pi aborted the tool, crashed, or moved on). Sub-agent handoffs run
@@ -214,8 +249,8 @@ type StreamViaCLiOptions = SimpleStreamOptions & {
    */
   mcpConfig?: {
     schemaPath: string;
-    /** Bumped whenever the schema file is rewritten. */
-    version: number;
+    /** Content hash of the staged surface (see SchemaFileWrite.version). */
+    version: string;
     /** Handoff socket path, or a promise of one (the broker starts lazily). */
     handoffSocket?: string | Promise<string | undefined>;
   };
@@ -254,6 +289,21 @@ function deltaMessages(messages: any[]): any[] {
     }
   }
   return messages.slice(lastAssistantIdx + 1);
+}
+
+/** Does `messages` extend the history this process has acknowledged? */
+function continuesHistory(cli: CliProcess, messages: any[]): boolean {
+  const checkpoint = cli.piHistory;
+  return (
+    !!checkpoint &&
+    messages.length >= checkpoint.length &&
+    historyHash(messages.slice(0, checkpoint.length)) === checkpoint.hash
+  );
+}
+
+/** A system-prompt update block ahead of the user content it rides with. */
+function withUpdate(update: string, blocks: any[]): any[] {
+  return update ? [{ type: "text", text: update }, ...blocks] : blocks;
 }
 
 /** pi toolResult content → MCP tool result the CLI understands. */
@@ -352,9 +402,12 @@ export function streamViaCli(
 ): AssistantMessageEventStream {
   const stream = createAssistantMessageEventStream();
   const piOwned = usesPiContext();
+  const ttl = cacheTtl(options);
   // pi 0.86+ sends its prompt and tools as system messages and leaves
   // systemPrompt empty. Both policies read the current ones from there.
-  context = normalizePiContext(context);
+  const normalized = normalizePiContext(context);
+  const system = normalized.system;
+  context = normalized;
   function failPiRequest(error: string, reason: "error" | "aborted" = "error") {
     const message = createEventBridge(stream, model).getOutput();
     stream.push({
@@ -396,6 +449,7 @@ export function streamViaCli(
     const piSessionId = options?.sessionId;
 
     try {
+      if (piSessionId) await settling.get(piSessionId);
       const cwd = options?.cwd ?? process.cwd();
       if (piOwned && piSessionId) {
         const oldId = getCliSession(piSessionId);
@@ -432,11 +486,13 @@ export function streamViaCli(
       // Thinking is deliberately absent: a live process takes a new level
       // through control requests (step 1), so changing it mid-session no
       // longer costs a respawn and a full-history replay.
+      // The system prompt is absent too: a live process takes pi's updates as
+      // a block in its next user message (systemUpdate), as pi's own API
+      // transports take them in place.
       const signature = JSON.stringify([
         model.id,
         systemPromptMode,
         piContext,
-        piOwned ? context.systemPrompt : null,
         cwd,
         options?.mcpConfigPath ?? null,
         options?.mcpConfig?.schemaPath ?? null,
@@ -445,41 +501,80 @@ export function streamViaCli(
         autocompact ?? null,
         allowHandoff,
         process.env.PI_CLAUDE_CLI_SETTINGS ?? null,
+        ttl ?? null,
       ]);
 
       // ---- 1. Reuse the session's parked process when this call continues it
+      //
+      // A call that is not the session's next step leaves the session's
+      // process alone: an extension's own model query (pi-web-access answers
+      // fetch_content with the session's model and id, cacheRetention
+      // "none"), or any call whose history does not extend a turn that is
+      // mid-handoff. It used to take that process, find the history foreign,
+      // and retire it under the tool it was waiting on, so the turn's next
+      // step re-imported the whole conversation.
+      const peeked = piSessionId
+        ? peekParkedCliProcess(piSessionId)
+        : undefined;
+      const sessionKey =
+        options?.cacheRetention === "none" ||
+        (piOwned && peeked?.turnActive && !continuesHistory(peeked, messages))
+          ? undefined
+          : piSessionId;
       let mode: "spawn" | "turn" | "handoff" = "spawn";
-      const parkedCli = piSessionId
-        ? takeParkedCliProcess(piSessionId)
+      // User messages this call adds, and the system update riding with them.
+      let userDelta: any[] = [];
+      let update = "";
+      const parkedCli = sessionKey
+        ? takeParkedCliProcess(sessionKey)
         : undefined;
       if (parkedCli) {
-        const checkpoint = parkedCli.piHistory;
         const historyMatches =
-          !piOwned ||
-          (!!checkpoint &&
-            messages.length >= checkpoint.length &&
-            historyHash(messages.slice(0, checkpoint.length)) ===
-              checkpoint.hash);
+          !piOwned || continuesHistory(parkedCli, messages);
+        const pending = !piOwned
+          ? ""
+          : parkedCli.system && systemUpdate(parkedCli.system, system);
         if (
           !forceFullReplay &&
           !stale &&
           historyMatches &&
           parkedCli.signature === signature
         ) {
-          const toolResults = delta.filter((m) => m?.role === "toolResult");
-          const userMessages = delta.filter((m) => m?.role === "user");
+          // Exactly what pi added since the process last spoke. An aborted
+          // reply is not history; the process already saw its prompt.
+          const added = piOwned
+            ? messages.slice(parkedCli.piHistory!.length).filter(isHistory)
+            : delta;
+          let n = 0;
+          while (added[n]?.role === "toolResult") n++;
+          const toolResults = added.slice(0, n);
+          const rest = added.slice(n);
+          const usersOnly =
+            rest.length > 0 && rest.every((m) => m?.role === "user");
           if (parkedCli.turnActive) {
             // Blocked in a proxied handoff: only pi's results for exactly
-            // those tool calls can continue the turn in-process.
+            // those tool calls can continue the turn in-process. A message
+            // the user sent while the tool ran (pi's steering) follows them:
+            // the CLI folds input that arrives mid-turn into the same turn
+            // (verified on 2.1.312), as pi puts it after the results.
             const ids = toolResults.map((m) => String(m.toolCallId ?? ""));
             if (
-              toolResults.length === delta.length &&
+              (rest.length === 0 || (piOwned && usersOnly)) &&
               parkedCli.canContinueHandoff(ids)
             ) {
               mode = "handoff";
+              userDelta = rest;
             }
-          } else if (toolResults.length === 0 && userMessages.length > 0) {
+          } else if (n === 0 && usersOnly) {
             mode = "turn";
+            userDelta = rest;
+          }
+          // An update waits for user input to ride with; a tool loop keeps
+          // the prompt it started on, as the thinking level does. Only a
+          // rewritten base prompt (undefined) needs a fresh process.
+          if (userDelta.length > 0) {
+            if (pending === undefined) mode = "spawn";
+            else update = pending;
           }
         }
         // A new user turn runs at the level pi asks for now. A handoff keeps
@@ -555,6 +650,7 @@ export function streamViaCli(
           resumeSessionId,
           newSessionId: newCliId,
           systemPromptMode,
+          cacheTtl: ttl,
         });
         // Record the mapping as soon as the session exists on disk. On a turn
         // that later errors, the mapping is cleared so the next turn reimports.
@@ -575,6 +671,7 @@ export function streamViaCli(
           getStderr,
           thinking,
         });
+        if (piOwned) cli.system = system;
         cli.writeUser(prompt);
       }
 
@@ -605,6 +702,7 @@ export function streamViaCli(
         finished = true;
         clearTimeout(inactivityTimer);
         clearTimeout(agentWaitTimer);
+        clearTimeout(abortBackstop);
         live.detach();
         resolveFinished();
       }
@@ -619,6 +717,16 @@ export function streamViaCli(
        * AssistantMessage (content:[]), pi gets a well-formed object.
        */
       function endStreamWithError(errMsg: string) {
+        if (resumeMiss) return;
+        pushStreamError(errMsg);
+        // An episode that failed cannot vouch for the process it was
+        // attached to; end it rather than park it for the next call.
+        void live.retire();
+        finishEpisode();
+      }
+
+      /** Hand pi its error now; the process is the caller's business. */
+      function pushStreamError(errMsg: string) {
         if (streamEnded || resumeMiss) return;
         streamEnded = true;
         const output = bridge.getOutput();
@@ -647,10 +755,6 @@ export function streamViaCli(
               } as any),
         );
         stream.end();
-        // An episode that failed cannot vouch for the process it was
-        // attached to; end it rather than park it for the next call.
-        void live.retire();
-        finishEpisode();
       }
 
       /** The process is not coming back: drop it from every registry. */
@@ -665,21 +769,27 @@ export function streamViaCli(
       /** Keep the process for the session's next call, or end it. */
       function releaseProcess(reason: "turn-end" | "handoff") {
         if (!live.alive || live.retired) return;
-        if (!piSessionId) {
+        if (!sessionKey) {
           void live.retire();
           return;
         }
         if (reason === "handoff") {
-          parkCliProcess(piSessionId, live, HANDOFF_WAIT_MS);
+          parkCliProcess(sessionKey, live, HANDOFF_WAIT_MS);
           return;
         }
-        const idle = keepaliveMs();
-        if (idle > 0) parkCliProcess(piSessionId, live, idle);
+        // Parked past its cache entry, a process saves nothing.
+        const idle =
+          ttl === "5m"
+            ? Math.min(keepaliveMs(), SHORT_CACHE_MS)
+            : keepaliveMs();
+        if (idle > 0) parkCliProcess(sessionKey, live, idle);
         else void live.retire();
       }
 
       // Inactivity timeout: kill subprocess if no stdout for INACTIVITY_TIMEOUT_MS
       let inactivityTimer: ReturnType<typeof setTimeout> | undefined;
+      // How long an aborted turn may take to settle before the process goes.
+      let abortBackstop: ReturnType<typeof setTimeout> | undefined;
 
       // Sub-agent wait state (see WAIT_FOR_AGENTS): how many `result`
       // envelopes have been treated as cycle boundaries, and the wall-clock
@@ -732,7 +842,27 @@ export function streamViaCli(
           aborted = true;
           selfInterrupted = true;
           if (piOwned) {
-            endStreamWithError("Request aborted");
+            if (!live.attached) {
+              endStreamWithError("Request aborted");
+              return;
+            }
+            // pi gets its answer now. The process finishes the interrupt and
+            // parks for the next turn (see the `result` branch); retiring it
+            // here made every Esc re-import the conversation.
+            pushStreamError("Request aborted");
+            sendInterrupt(proc);
+            if (sessionKey) {
+              const key = sessionKey;
+              settling.set(key, finishedPromise);
+              void finishedPromise.then(() => {
+                if (settling.get(key) === finishedPromise) settling.delete(key);
+              });
+            }
+            abortBackstop = setTimeout(() => {
+              void live.retire();
+              finishEpisode();
+            }, ABORT_GRACE_MS);
+            abortBackstop.unref?.();
             return;
           }
           sendInterrupt(proc);
@@ -1022,6 +1152,13 @@ export function streamViaCli(
             if (selfInterrupted && !aborted) {
               void live.retire();
             } else {
+              // An interrupted process has seen exactly this call's history;
+              // the aborted reply is not history (isHistory).
+              if (aborted && piOwned)
+                live.piHistory = {
+                  length: messages.length,
+                  hash: historyHash(messages),
+                };
               releaseProcess("turn-end");
             }
             finishEpisode();
@@ -1034,7 +1171,12 @@ export function streamViaCli(
       resetInactivityTimer();
 
       // Continue the parked process
+      if (piOwned && userDelta.length > 0) live.system = system;
       if (mode === "handoff") {
+        // Steering first: the CLI holds it until the results land, then
+        // sends both in the same request.
+        if (userDelta.length > 0)
+          live.writeUser(withUpdate(update, replayPiMessages(userDelta)));
         for (const m of delta) {
           if (m?.role !== "toolResult") continue;
           live.deliverHandoffResult(
@@ -1044,7 +1186,9 @@ export function streamViaCli(
         }
       } else if (mode === "turn") {
         live.writeUser(
-          piOwned ? replayPiMessages(delta) : buildResumePrompt(context),
+          piOwned
+            ? withUpdate(update, replayPiMessages(userDelta))
+            : buildResumePrompt(context),
         );
       }
 

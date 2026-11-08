@@ -14,7 +14,10 @@ Requires Node 22+, pi, and an authenticated `claude` binary on PATH (Claude Code
 
 - **Prompt:** pi's current system prompt replaces Claude Code's coding-agent prompt. A short binding explains the MCP tool-name prefix. Project instructions, skills and `.pi` paths remain unchanged; Claude does not independently discover them.
 - **Tools:** only the current request's tools are advertised. All tools, including read/edit/bash, execute in pi through the authenticated MCP bridge. Normal pi tool hooks, schemas and complete results apply. The provider never enables inactive tools. Claude-native agents, planning, scheduling and web tools are not enabled.
-- **Conversation:** pi's current history is authoritative. A warm Claude process is reused only while the acknowledged history prefix and launch configuration match. Edits, compaction, provider changes, prompt changes or tool changes cause a clean reimport.
+- **Conversation:** pi's current history is authoritative. A warm Claude process is reused only while the acknowledged history prefix and launch configuration match. Edits, compaction, provider changes, a rewritten base prompt or tool changes cause a clean reimport. System-prompt section updates, messages sent while a tool runs, aborted replies and an extension's own model calls keep the warm process.
+- **Usage:** the 1-hour share of cache writes is reported as `cacheWrite1h`, which pi prices at 2x input instead of 1.25x.
+- **Cache lifetime:** pi's retention (`cacheRetention`, else `PI_CACHE_RETENTION`) becomes Claude Code's `CLAUDE_CODE_PROMPT_CACHE_TTL`: `short` is 5 minutes, `long` an hour, unset the CLI's default (an hour on a subscription). A `short` process also parks no longer than its cache lives. With `PI_SUBAGENT_CACHE_RETENTION=short`, pi-subagents children get 5-minute entries, as Claude Code's own sub-agents do.
+- **Context:** `totalTokens` is the last request's prompt plus its reply, as pi's Anthropic provider reports it, so pi's budget check no longer lags a thinking turn behind.
 - **Storage:** default Claude processes use `--no-session-persistence`. No new Claude conversation file, resume pairing or saved system-prompt sidecar is created. Private temporary prompt and MCP files are removed when no longer needed; the runtime directory is removed on process exit. A SIGKILL can leave its private temporary directory behind.
 - **Compaction:** pi compacts its own history normally. CLI auto-compaction is disabled. Hosts must not switch off pi compaction just because this provider is selected.
 
@@ -22,7 +25,7 @@ Requires Node 22+, pi, and an authenticated `claude` binary on PATH (Claude Code
 
 Claude → native pi → Claude uses the same pi session. Switching models retires the parked Claude process and clears its UI status. Switching back imports pi's current context, including native-provider turns, full tool results and images. Branch navigation and compaction cannot resume a stale Claude transcript.
 
-A fresh CLI process costs a history import and may lose the previous prompt cache. Ordinary follow-ups and tool handoffs keep the warm process; pi does not resend history on each tool call.
+A fresh CLI process costs a history import and may lose the previous prompt cache. Ordinary follow-ups, tool handoffs, steering, aborts and system-prompt section updates keep the warm process; pi does not resend history on each tool call.
 
 **Not byte-identical to a direct API provider:** Claude Code's print interface accepts user messages, not an arbitrary structured conversation. Imports preserve message order and content using role-labelled text plus image blocks. Historical tool calls are records, not re-executed operations. Claude's internal runtime and service policies still apply.
 

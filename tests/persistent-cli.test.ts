@@ -137,7 +137,7 @@ describe("persistent CLI process", () => {
     sessionId,
     mcpConfig: {
       schemaPath: "/tmp/schema.json",
-      version: 1,
+      version: "v1",
       handoffSocket: "/tmp/handoff.sock",
     },
     ...extra,

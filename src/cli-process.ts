@@ -41,6 +41,7 @@ import {
   type HandoffTarget,
 } from "./handoff-broker.js";
 import type { NdjsonMessage } from "./types.js";
+import type { SystemState } from "./pi-context.js";
 import {
   thinkingControls,
   type CliThinking,
@@ -142,6 +143,8 @@ export class CliProcess implements HandoffTarget {
   readonly getStderr: () => string;
   /** Pi history acknowledged by this disposable process, never a second ledger. */
   piHistory?: { length: number; hash: string };
+  /** The system prompt this process has been given: at spawn, then every update. */
+  system?: SystemState;
   /**
    * The thinking the CLI will use for its next user turn: the spawn flags,
    * then every change `applyThinking` got acknowledged.
@@ -598,6 +601,14 @@ export function takeParkedCliProcess(
   cli.clearIdleTimer();
   if (!cli.alive || cli.retired) return undefined;
   return cli;
+}
+
+/** The parked process for a pi session, left in the pool. */
+export function peekParkedCliProcess(
+  piSessionId: string,
+): CliProcess | undefined {
+  const cli = parked.get(piSessionId);
+  return cli?.alive && !cli.retired ? cli : undefined;
 }
 
 export function parkedCliProcessCount(): number {

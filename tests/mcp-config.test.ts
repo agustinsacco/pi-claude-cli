@@ -214,7 +214,7 @@ describe("writeMcpConfig", () => {
 
     // First writeFileSync call is the schema file
     const schemaCall = mocks.writeFileSync.mock.calls[0];
-    expect(schemaCall[0]).toMatch(/mcp-schemas\.json$/);
+    expect(schemaCall[0]).toMatch(/mcp-schemas-[0-9a-f]{16}\.json$/);
     expect(JSON.parse(schemaCall[1])).toEqual(toolDefs);
     expectOwnerOnly(schemaCall);
   });
@@ -299,7 +299,7 @@ describe("writeMcpConfig", () => {
       "mcp-schema-server.cjs",
     );
     // Second arg should be the schema file path
-    expect(server.args[1]).toMatch(/mcp-schemas\.json$/);
+    expect(server.args[1]).toMatch(/mcp-schemas-[0-9a-f]{16}\.json$/);
   });
 
   it("returns the config file path", () => {
@@ -349,7 +349,8 @@ describe("writeMcpConfig refresh", () => {
 
     expect(second.changed).toBe(true);
     const schemaWrites = mocks.writeFileSync.mock.calls.filter(
-      (call: unknown[]) => /mcp-schemas\.json$/.test(String(call[0])),
+      (call: unknown[]) =>
+        /mcp-schemas-[0-9a-f]{16}\.json$/.test(String(call[0])),
     );
     expect(schemaWrites).toHaveLength(1);
     expect(JSON.parse(String(schemaWrites[0][1]))[0].description).toBe(
@@ -357,29 +358,35 @@ describe("writeMcpConfig refresh", () => {
     );
   });
 
-  it("keeps a stable path across refreshes so temp files never accumulate", () => {
+  it("gives each surface its own file, so a sibling's change never reaches another CLI", () => {
+    // pi runs foreground sub-agents in-process: two sessions with different
+    // tools stage concurrently, and each CLI reads its file after spawning.
     const first = writeMcpConfig(defs("a"));
     const second = writeMcpConfig(defs("b"));
+    const again = writeMcpConfig(defs("a"));
 
     expect(second.configPath).toBe(first.configPath);
+    expect(again.changed).toBe(false);
     const schemaPaths = new Set(
       mocks.writeFileSync.mock.calls
         .map((call: unknown[]) => String(call[0]))
-        .filter((path: string) => /mcp-schemas\.json$/.test(path)),
+        .filter((path: string) => /mcp-schemas-[0-9a-f]{16}\.json$/.test(path)),
     );
-    expect(schemaPaths.size).toBe(1);
+    expect(schemaPaths.size).toBe(2);
   });
 
-  it("writes the config file once, not on every refresh", () => {
+  it("rewrites the config only when it must name another schema file", () => {
     writeMcpConfig(defs("a"));
     mocks.writeFileSync.mockClear();
+    const configWrites = () =>
+      mocks.writeFileSync.mock.calls.filter((call: unknown[]) =>
+        /mcp-config[^/]*\.json$/.test(String(call[0])),
+      );
 
+    writeMcpConfig(defs("a"));
+    expect(configWrites()).toHaveLength(0);
     writeMcpConfig(defs("b"));
-
-    const configWrites = mocks.writeFileSync.mock.calls.filter(
-      (call: unknown[]) => /mcp-config[^/]*\.json$/.test(String(call[0])),
-    );
-    expect(configWrites).toHaveLength(0);
+    expect(configWrites()).toHaveLength(1);
   });
 });
 
@@ -401,9 +408,9 @@ describe("cleanupMcpConfigFiles", () => {
     const removed = mocks.unlinkSync.mock.calls.map((call: unknown[]) =>
       String(call[0]),
     );
-    expect(removed.some((p: string) => /mcp-schemas\.json$/.test(p))).toBe(
-      true,
-    );
+    expect(
+      removed.some((p: string) => /mcp-schemas-[0-9a-f]{16}\.json$/.test(p)),
+    ).toBe(true);
     expect(removed.some((p: string) => /mcp-config[^/]*\.json$/.test(p))).toBe(
       true,
     );
@@ -508,16 +515,21 @@ describe("writeSessionMcpConfig", () => {
     expect(mocks.unlinkSync).toHaveBeenCalledWith(b);
   });
 
-  it("writeSchemaFile bumps the version only when the surface changes", async () => {
+  it("writeSchemaFile names the surface, so going back to one is no change", async () => {
     const { writeSchemaFile } = await import("../src/mcp-config");
     const defs = (d: string): McpToolDef[] => [
       { name: "t", description: d, inputSchema: {} },
     ];
     const a = writeSchemaFile(defs("one"));
     const b = writeSchemaFile(defs("one"));
+    // A side call with other tools in between (an extension's own model
+    // query) must not make the session's own surface look new afterwards.
     const c = writeSchemaFile(defs("two"));
-    expect(a).toMatchObject({ changed: true, version: 1 });
-    expect(b).toMatchObject({ changed: false, version: 1 });
-    expect(c).toMatchObject({ changed: true, version: 2 });
+    const d = writeSchemaFile(defs("one"));
+    expect(a.changed).toBe(true);
+    expect(b).toEqual({ ...a, changed: false });
+    expect(c.changed).toBe(true);
+    expect(c.version).not.toBe(a.version);
+    expect(d.version).toBe(a.version);
   });
 });

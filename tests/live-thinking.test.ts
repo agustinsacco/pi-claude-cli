@@ -11,21 +11,14 @@
  *
  * Runs only with PI_OWNED_LIVE=1 and an authenticated Claude Code.
  */
-import {
-  chmodSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { execSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import https from "node:https";
 import type { AddressInfo } from "node:net";
-import { tmpdir, userInfo } from "node:os";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { RpcClient } from "@earendil-works/pi-coding-agent";
+import { spawnCounter } from "./fixtures/spawn-counter";
 import { describe, expect, it } from "vitest";
 
 interface WireRequest {
@@ -78,33 +71,6 @@ async function startProxy() {
     url: `http://127.0.0.1:${port}`,
     requests,
     close: () => new Promise<void>((r) => server.close(() => r())),
-  };
-}
-
-/**
- * A `claude` on PATH that records each turn process, then runs the real one.
- *
- * pi and this test may run under a scratch HOME; the real CLI gets the
- * account's own home (from the passwd entry, not the environment), because
- * that is where its login lives. It writes no transcript either way: pi
- * context spawns it with --no-session-persistence.
- */
-function spawnCounter(dir: string) {
-  const real = execSync("command -v claude", { encoding: "utf8" }).trim();
-  const home = userInfo().homedir;
-  const log = join(dir, "spawns.log");
-  writeFileSync(log, "");
-  const bin = join(dir, "bin");
-  mkdirSync(bin);
-  const wrapper = join(bin, "claude");
-  writeFileSync(
-    wrapper,
-    `#!/bin/sh\ncase "$*" in *--input-format*) echo spawn >> "${log}";; esac\nHOME="${home}" exec "${real}" "$@"\n`,
-  );
-  chmodSync(wrapper, 0o755);
-  return {
-    bin,
-    count: () => readFileSync(log, "utf8").split("\n").filter(Boolean).length,
   };
 }
 

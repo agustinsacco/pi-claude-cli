@@ -24,6 +24,7 @@
  * address the broker directly.
  */
 
+import { createHash } from "node:crypto";
 import { writeFileSync, unlinkSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -53,19 +54,24 @@ export interface McpConfigWrite {
   changed: boolean;
 }
 
-/** The staged schema file and how many times it has been rewritten. */
+/** The staged schema file and the surface it holds. */
 export interface SchemaFileWrite {
   schemaPath: string;
   changed: boolean;
-  /** Increments on every rewrite; 1 after the first write. */
-  version: number;
+  /**
+   * Content hash of the surface, which also names its file. One shared file
+   * and a counter made every alternation look like a change, and pi runs
+   * foreground sub-agents in its own process: a child's call with other tools
+   * bumped the counter (the parent's next call retired a process whose tools
+   * never changed) and rewrote the file a sibling's CLI was about to read.
+   */
+  version: string;
 }
 
-/** Serialized tool defs as of the last write, for change detection. */
-let lastSchemaJson: string | undefined;
-let schemaVersion = 0;
-/** The legacy per-process config file's content never varies: written once. */
-let configWritten = false;
+/** Schema files this process staged; one per surface, removed at exit. */
+const schemaPaths = new Set<string>();
+/** The schema file the legacy per-process config names. */
+let configSchemaPath: string | undefined;
 /** Per-session config files this process wrote, for exit cleanup. */
 const sessionConfigPaths = new Map<string, string>();
 
@@ -89,11 +95,6 @@ export function getCustomToolDefs(pi: any): McpToolDef[] {
       description: tool.description,
       inputSchema: tool.parameters,
     }));
-}
-
-/** Where this process stages the tool schemas the CLI advertises. */
-function schemaFilePath(): string {
-  return runtimeFile("mcp-schemas.json");
 }
 
 /** Where this process stages the legacy (session-less) `--mcp-config` file. */
@@ -124,13 +125,17 @@ function serverPath(): string {
  */
 export function writeSchemaFile(toolDefs: McpToolDef[]): SchemaFileWrite {
   const schemaJson = JSON.stringify(toolDefs);
-  const changed = schemaJson !== lastSchemaJson;
+  const version = createHash("sha256")
+    .update(schemaJson)
+    .digest("hex")
+    .slice(0, 16);
+  const schemaPath = runtimeFile(`mcp-schemas-${version}.json`);
+  const changed = !schemaPaths.has(schemaPath);
   if (changed) {
-    writeFileSync(schemaFilePath(), schemaJson, { mode: RUNTIME_FILE_MODE });
-    lastSchemaJson = schemaJson;
-    schemaVersion++;
+    writeFileSync(schemaPath, schemaJson, { mode: RUNTIME_FILE_MODE });
+    schemaPaths.add(schemaPath);
   }
-  return { schemaPath: schemaFilePath(), changed, version: schemaVersion };
+  return { schemaPath, changed, version };
 }
 
 /**
@@ -144,7 +149,7 @@ export function writeMcpConfig(toolDefs: McpToolDef[]): McpConfigWrite {
   const configPath = configFilePath();
   const { schemaPath, changed } = writeSchemaFile(toolDefs);
 
-  if (!configWritten) {
+  if (configSchemaPath !== schemaPath) {
     const config = {
       mcpServers: {
         "custom-tools": {
@@ -156,7 +161,7 @@ export function writeMcpConfig(toolDefs: McpToolDef[]): McpConfigWrite {
     writeFileSync(configPath, JSON.stringify(config), {
       mode: RUNTIME_FILE_MODE,
     });
-    configWritten = true;
+    configSchemaPath = schemaPath;
   }
 
   return { configPath, changed };
@@ -214,10 +219,11 @@ export function removeSessionMcpConfig(cliSessionId: string): void {
  */
 export function cleanupMcpConfigFiles(): void {
   const paths = [
-    schemaFilePath(),
+    ...schemaPaths,
     configFilePath(),
     ...sessionConfigPaths.values(),
   ];
+  schemaPaths.clear();
   sessionConfigPaths.clear();
   for (const path of paths) {
     try {
@@ -230,8 +236,7 @@ export function cleanupMcpConfigFiles(): void {
 
 /** Test seam: forget what this process has already written. */
 export function resetMcpConfigCache(): void {
-  lastSchemaJson = undefined;
-  schemaVersion = 0;
-  configWritten = false;
+  schemaPaths.clear();
+  configSchemaPath = undefined;
   sessionConfigPaths.clear();
 }
