@@ -30,6 +30,9 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runtimeFile, RUNTIME_FILE_MODE } from "./runtime-dir.js";
 
+/** The name pi's schema server goes by in every MCP config written here. */
+export const MCP_SERVER_NAME = "custom-tools";
+
 /** The 6 built-in tools that pi handles natively (match pi tool names). */
 const BUILT_IN_TOOL_NAMES = new Set([
   "read",
@@ -152,7 +155,7 @@ export function writeMcpConfig(toolDefs: McpToolDef[]): McpConfigWrite {
   if (configSchemaPath !== schemaPath) {
     const config = {
       mcpServers: {
-        "custom-tools": {
+        [MCP_SERVER_NAME]: {
           command: "node",
           args: [serverPath(), schemaPath],
         },
@@ -190,7 +193,7 @@ export function writeSessionMcpConfig(
     : [serverPath(), schemaPath];
   const config = {
     mcpServers: {
-      "custom-tools": { command: "node", args: args.filter(Boolean) },
+      [MCP_SERVER_NAME]: { command: "node", args: args.filter(Boolean) },
     },
   };
   writeFileSync(configPath, JSON.stringify(config), {

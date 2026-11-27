@@ -101,9 +101,10 @@ const argsAt = (i: number) => (spawn as any).mock.calls[i][1] as string[];
 const events = (n = 0) => MockStream.mock.instances[n]._events as any[];
 const done = (n = 0) => events(n).find((e) => e.type === "done");
 const failure = (n = 0) => events(n).find((e) => e.type === "error");
+/** The args with the fresh CLI session id (and the paths named after it) masked. */
 const withoutSessionId = (argv: string[]) => {
-  const i = argv.indexOf("--session-id");
-  return argv.filter((_, j) => j !== i + 1);
+  const id = argv[argv.indexOf("--session-id") + 1];
+  return argv.map((arg) => arg.split(id).join("<id>"));
 };
 const opts = (extra: any = {}) => ({
   sessionId: "lane",

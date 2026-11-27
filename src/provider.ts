@@ -65,7 +65,12 @@ import {
   setSystemPrompt,
   clearSystemPrompt,
 } from "./session-map.js";
-import { writeSessionMcpConfig, removeSessionMcpConfig } from "./mcp-config.js";
+import {
+  writeSessionMcpConfig,
+  removeSessionMcpConfig,
+  MCP_SERVER_NAME,
+} from "./mcp-config.js";
+import { textHasToolCallMarkup } from "./tool-call-markup.js";
 import {
   CliProcess,
   parkCliProcess,
@@ -191,6 +196,9 @@ function keepaliveMs(): number {
 
 /** How long a five-minute cache entry lives, and so a process worth parking. */
 const SHORT_CACHE_MS = 5 * 60_000;
+
+/** Error for a turn that wrote `<invoke name="…">` text instead of calling. */
+export const TOOL_CALLS_AS_TEXT_MESSAGE = `Claude wrote its tool calls as text instead of calling them: pi's tools were not connected (MCP server ${MCP_SERVER_NAME}). Try again.`;
 
 /**
  * The cache lifetime pi asked for, resolved as its own providers resolve it
@@ -427,13 +435,23 @@ export function streamViaCli(
    * sidecar pointed --resume at a CLI session that no longer exists on disk.
    * The driver below retries once with a fresh session imported from pi's
    * full history, re-recording the mapping.
+   *
+   * Returns "mcp-retry" (again without touching the stream) when the process
+   * it spawned reported pi's schema server as not connected; the driver spawns
+   * once more. `lastMcpAttempt` marks that second spawn, which fails the turn
+   * instead of retrying again.
    */
   async function runOnce(
     forceFullReplay: boolean,
-  ): Promise<"ok" | "resume-miss"> {
+    lastMcpAttempt: boolean,
+  ): Promise<"ok" | "resume-miss" | "mcp-retry"> {
     let cli: CliProcess | undefined;
     let abortHandler: (() => void) | undefined;
-    let resumeMiss = false;
+    // This attempt was abandoned for the driver to retry; it pushes nothing.
+    let retry: "resume-miss" | "mcp-retry" | undefined;
+    // Set when this attempt spawned with an MCP config: its init event must
+    // then report pi's schema server as connected.
+    let expectsMcpServer = false;
     // Track HANDOFF tool_use blocks (custom pi tools) for the decision at
     // message_stop. Built-ins run natively and never end the episode.
     let sawHandoffTool = false;
@@ -642,6 +660,7 @@ export function streamViaCli(
               )
             : undefined);
 
+        expectsMcpServer = !!mcpConfigPath;
         const proc = spawnClaude(model.id, systemPrompt || undefined, {
           cwd,
           signal: options?.signal,
@@ -717,7 +736,7 @@ export function streamViaCli(
        * AssistantMessage (content:[]), pi gets a well-formed object.
        */
       function endStreamWithError(errMsg: string) {
-        if (resumeMiss) return;
+        if (retry) return;
         pushStreamError(errMsg);
         // An episode that failed cannot vouch for the process it was
         // attached to; end it rather than park it for the next call.
@@ -727,7 +746,7 @@ export function streamViaCli(
 
       /** Hand pi its error now; the process is the caller's business. */
       function pushStreamError(errMsg: string) {
-        if (streamEnded || resumeMiss) return;
+        if (streamEnded || retry) return;
         streamEnded = true;
         const output = bridge.getOutput();
         const errorMessage = {
@@ -920,14 +939,58 @@ export function streamViaCli(
         });
       }
 
+      /**
+       * The CLI holds its first turn until its MCP servers connect or give up
+       * (MCP_TIMEOUT), then lists each one in `init`. A model run without
+       * pi's schema server still sees the tool names in pi's prompt and writes
+       * its calls as text, so such a process never gets to answer: it is
+       * killed and spawned once more, then the turn fails.
+       */
+      function checkMcpServer(init: {
+        mcp_servers?: Array<{ name?: string; status?: string }>;
+      }) {
+        expectsMcpServer = false;
+        const server = init.mcp_servers?.find(
+          (s) => s?.name === MCP_SERVER_NAME,
+        );
+        if (!server || server.status === "connected") return;
+        forceKillProcess(proc);
+        // Nothing ran: a legacy mapping must not point at this session.
+        if (!piOwned && piSessionId && newCliId) {
+          clearCliSession(piSessionId);
+          clearSystemPrompt(newCliId);
+        }
+        if (!lastMcpAttempt && !aborted) {
+          retry = "mcp-retry";
+          void discardProcess();
+          finishEpisode();
+          return;
+        }
+        void discardProcess();
+        endStreamWithError(
+          `Claude Code could not connect Phosphor's tools (MCP server ${MCP_SERVER_NAME}: ${server.status ?? "unknown"}). Try again.`,
+        );
+      }
+
+      /** The finished turn wrote tool calls as text and called nothing. */
+      function wroteToolCallsAsText(): boolean {
+        const content = bridge.getOutput().content ?? [];
+        return (
+          !content.some((b: any) => b.type === "toolCall") &&
+          content.some(
+            (b: any) => b.type === "text" && textHasToolCallMarkup(b.text),
+          )
+        );
+      }
+
       const sink: EpisodeSink = {
         onError(err) {
-          if (resumeMiss || finished) return;
+          if (retry || finished) return;
           const stderr = live.getStderr();
           endStreamWithError(stderr || err.message);
         },
         onClose(code) {
-          if (resumeMiss || finished) return;
+          if (retry || finished) return;
           if (piOwned || (code !== 0 && code !== null)) {
             const stderr = live.getStderr();
             const message = stderr
@@ -942,7 +1005,7 @@ export function streamViaCli(
           finishEpisode();
         },
         onMessage(msg) {
-          if (resumeMiss || finished) return;
+          if (retry || finished) return;
           // Reset inactivity timer on each line of output
           resetInactivityTimer();
 
@@ -1013,6 +1076,8 @@ export function streamViaCli(
                 /* a status push must never break a turn */
               }
             }
+          } else if (msg.type === "system" && (msg as any).subtype === "init") {
+            if (expectsMcpServer) checkMcpServer(msg as any);
           } else if (
             msg.type === "system" &&
             (msg as any).subtype === "compact_boundary"
@@ -1077,7 +1142,7 @@ export function streamViaCli(
                 // longer exists. Clear it; the driver reimports once.
                 if (piSessionId) clearCliSession(piSessionId);
                 clearSystemPrompt(resumeSessionId);
-                resumeMiss = true;
+                retry = "resume-miss";
                 void discardProcess();
                 finishEpisode();
                 return;
@@ -1144,6 +1209,19 @@ export function streamViaCli(
               return;
             }
 
+            // A tool call pi would show as a finished answer. The process
+            // goes with the error: its model had no tools to call.
+            if (
+              !isError &&
+              !selfInterrupted &&
+              !aborted &&
+              wroteToolCallsAsText()
+            ) {
+              live.turnReported = ZERO_USAGE;
+              endStreamWithError(TOOL_CALLS_AS_TEXT_MESSAGE);
+              return;
+            }
+
             // The turn is over. The process stays for the session's next
             // call unless the turn was interrupted for a legacy handoff (the
             // CLI transcript then ends on a rejected tool; only --resume with
@@ -1194,7 +1272,7 @@ export function streamViaCli(
 
       await finishedPromise;
 
-      if (resumeMiss) return "resume-miss";
+      if (retry) return retry;
 
       // Push done after the episode ends (async). Pushing synchronously
       // inside handleMessageStop prevents pi from executing tools.
@@ -1248,12 +1326,25 @@ export function streamViaCli(
 
   (async () => {
     try {
-      const outcome = await runOnce(false);
-      if (outcome === "resume-miss") {
-        console.error(
-          "[pi-claude-cli] CLI session missing for --resume — importing pi history into a fresh CLI session",
-        );
-        await runOnce(true);
+      // Each retry happens at most once; runOnce stops asking for an MCP
+      // retry once lastMcpAttempt is set, and a full replay never resumes.
+      let forceFullReplay = false;
+      let lastMcpAttempt = false;
+      for (;;) {
+        const outcome = await runOnce(forceFullReplay, lastMcpAttempt);
+        if (outcome === "resume-miss" && !forceFullReplay) {
+          console.error(
+            "[pi-claude-cli] CLI session missing for --resume — importing pi history into a fresh CLI session",
+          );
+          forceFullReplay = true;
+        } else if (outcome === "mcp-retry" && !lastMcpAttempt) {
+          console.error(
+            `[pi-claude-cli] Claude Code did not connect MCP server ${MCP_SERVER_NAME} — spawning once more`,
+          );
+          lastMcpAttempt = true;
+        } else {
+          break;
+        }
       }
     } catch (err: any) {
       if (piOwned) {
