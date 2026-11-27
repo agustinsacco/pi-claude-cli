@@ -1469,7 +1469,7 @@ describe("streamViaCli", () => {
   });
 
   describe("abort signal already aborted", () => {
-    it("winds down a pre-aborted signal via interrupt + backstop", async () => {
+    it("spawns nothing for a pre-aborted signal and ends as aborted", async () => {
       const model = mockModels[0] as any;
       const context = {
         messages: [{ role: "user", content: "Hello" }],
@@ -1478,14 +1478,13 @@ describe("streamViaCli", () => {
       controller.abort(); // Abort BEFORE calling streamViaCli
 
       streamViaCli(model, context, { signal: controller.signal });
-      await vi.advanceTimersByTimeAsync(2100);
+      await vi.advanceTimersByTimeAsync(0);
 
-      const proc = (spawn as any).mock.results[0].value;
-      expect(proc.kill).toHaveBeenCalledWith("SIGKILL");
-
-      // Clean up
-      proc.stdout.end();
-      await vi.advanceTimersByTimeAsync(100);
+      expect(spawn).not.toHaveBeenCalled();
+      const events = MockAssistantMessageEventStream.mock.instances[0]._events;
+      const error = events.find((e: any) => e.type === "error");
+      expect(error.reason).toBe("aborted");
+      expect(error.error.stopReason).toBe("aborted");
     });
   });
 

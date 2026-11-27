@@ -435,7 +435,8 @@ export function streamViaCli(
    *
    * Returns "mcp-retry" (again without touching the stream) when the process
    * it spawned reported pi's schema server as not connected; the driver spawns
-   * once more with the same arguments.
+   * once more, importing pi's history into a fresh session (the failed one
+   * may already hold the prompt).
    *
    * A turn respawns at most once for either reason. `lastAttempt` marks that
    * respawn: it never asks for another, and fails the turn instead.
@@ -646,9 +647,9 @@ export function streamViaCli(
           storedSystemPrompt ??
           buildSystemPrompt(context, cwd, systemPromptMode);
 
-        // A respawn (or a pi-owned turn) aborted while it waited must not
-        // start a process or hand it the prompt.
-        if (options?.signal?.aborted && (piOwned || lastAttempt)) {
+        // An aborted request (cold, or a respawn that waited) must not start
+        // a process or hand it the prompt.
+        if (options?.signal?.aborted) {
           failPiRequest("Request aborted", "aborted");
           return "ok";
         }
@@ -674,16 +675,24 @@ export function streamViaCli(
           (piOwned
             ? requestTools.length > 0
             : requestTools.some((t) => !isBuiltInToolName(t?.name)));
-        const proc = spawnClaude(model.id, systemPrompt || undefined, {
-          cwd,
-          signal: options?.signal,
-          thinking,
-          mcpConfigPath,
-          resumeSessionId,
-          newSessionId: newCliId,
-          systemPromptMode,
-          cacheTtl: ttl,
-        });
+        let proc: ReturnType<typeof spawnClaude>;
+        try {
+          proc = spawnClaude(model.id, systemPrompt || undefined, {
+            cwd,
+            signal: options?.signal,
+            thinking,
+            mcpConfigPath,
+            resumeSessionId,
+            newSessionId: newCliId,
+            systemPromptMode,
+            cacheTtl: ttl,
+            mcpStartupTimeouts: expectsMcpServer,
+          });
+        } catch (err) {
+          // No CliProcess will own the file to remove it.
+          removeSessionMcpConfig(ownMcpConfigPath);
+          throw err;
+        }
         // Record the mapping as soon as the session exists on disk. On a turn
         // that later errors, the mapping is cleared so the next turn reimports.
         if (!piOwned && piSessionId && newCliId)
@@ -969,10 +978,12 @@ export function streamViaCli(
         );
         if (!server || server.status === "connected") return;
         forceKillProcess(proc);
-        // Nothing ran: a legacy mapping must not point at this session.
-        if (!piOwned && piSessionId && newCliId) {
+        // A legacy mapping must not point at this session: Claude Code
+        // records the prompt before init, so resuming it would send the
+        // prompt twice. The transcript itself stays on disk.
+        if (!piOwned && piSessionId) {
           clearCliSession(piSessionId);
-          clearSystemPrompt(newCliId);
+          clearSystemPrompt(live.cliSessionId);
         }
         if (!lastAttempt && !aborted) {
           retry = "mcp-retry";
@@ -1331,7 +1342,7 @@ export function streamViaCli(
         console.error(
           `[pi-claude-cli] Claude Code did not connect MCP server ${MCP_SERVER_NAME} — spawning once more`,
         );
-        await runOnce(false, true);
+        await runOnce(true, true);
       }
     } catch (err: any) {
       if (piOwned) {
