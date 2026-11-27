@@ -266,9 +266,11 @@ export function spawnClaude(
   if (options?.cacheTtl) env.CLAUDE_CODE_PROMPT_CACHE_TTL = options.cacheTtl;
   if (!env.MCP_TOOL_TIMEOUT)
     env.MCP_TOOL_TIMEOUT = String(DEFAULT_MCP_TOOL_TIMEOUT_MS);
-  if (!env.MCP_CONNECT_TIMEOUT_MS)
+  // Absent only: a host that set either one, even to "", keeps its value.
+  if (env.MCP_CONNECT_TIMEOUT_MS === undefined)
     env.MCP_CONNECT_TIMEOUT_MS = String(DEFAULT_MCP_CONNECT_TIMEOUT_MS);
-  if (!env.MCP_TIMEOUT) env.MCP_TIMEOUT = String(DEFAULT_MCP_TIMEOUT_MS);
+  if (env.MCP_TIMEOUT === undefined)
+    env.MCP_TIMEOUT = String(DEFAULT_MCP_TIMEOUT_MS);
 
   const proc = spawn("claude", args, {
     stdio: ["pipe", "pipe", "pipe"],

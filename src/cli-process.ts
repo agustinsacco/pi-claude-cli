@@ -141,6 +141,8 @@ export class CliProcess implements HandoffTarget {
   /** True when proxied handoffs are on for this process. */
   readonly allowHandoff: boolean;
   readonly getStderr: () => string;
+  /** The MCP config written for this spawn, removed when the process ends. */
+  readonly mcpConfigPath?: string;
   /** Pi history acknowledged by this disposable process, never a second ledger. */
   piHistory?: { length: number; hash: string };
   /** The system prompt this process has been given: at spawn, then every update. */
@@ -199,6 +201,7 @@ export class CliProcess implements HandoffTarget {
       allowHandoff: boolean;
       getStderr: () => string;
       thinking?: CliThinking;
+      mcpConfigPath?: string;
     },
   ) {
     this.proc = proc;
@@ -206,6 +209,7 @@ export class CliProcess implements HandoffTarget {
     this.signature = options.signature;
     this.allowHandoff = options.allowHandoff;
     this.getStderr = options.getStderr;
+    this.mcpConfigPath = options.mcpConfigPath;
     this.thinking = options.thinking ?? { kind: "default" };
 
     if (this.allowHandoff) registerHandoffTarget(this.cliSessionId, this);
@@ -453,7 +457,7 @@ export class CliProcess implements HandoffTarget {
   retire(): Promise<void> {
     if (this.retired) return this.waitClosed();
     this.retired = true;
-    removeSessionMcpConfig(this.cliSessionId);
+    removeSessionMcpConfig(this.mcpConfigPath);
     this.clearIdleTimer();
     unregisterHandoffTarget(this.cliSessionId, this);
     this.failPendingCalls("pi abandoned this tool call.");
@@ -553,7 +557,7 @@ export class CliProcess implements HandoffTarget {
   private handleProcClose(code: number | null): void {
     if (this.closed) return;
     this.closed = true;
-    removeSessionMcpConfig(this.cliSessionId);
+    removeSessionMcpConfig(this.mcpConfigPath);
     this.alive = false;
     this.turnActive = false;
     this.clearIdleTimer();
