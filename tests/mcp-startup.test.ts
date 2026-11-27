@@ -1,14 +1,16 @@
 /**
  * Claude must not answer a pi turn without pi's tools. On a loaded machine the
  * CLI's MCP client gave up on the schema server (5 s connect, 30 s first-turn
- * hold), the init event reported `custom-tools` as failed, and the model wrote
- * its tool calls as `<invoke name="…">` text that pi showed as a finished
- * answer. Captured on claude 2.1.327 with a server that took 40 s to start:
+ * hold), the init event reported `custom-tools` as failed, and the model
+ * answered without pi's tools. Captured on claude 2.1.327 with a server that took 40 s to start:
  * defaults → `failed` and no tools; raised timeouts → `connected`.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 vi.mock("cross-spawn", () => ({
   default: vi.fn(() => {
@@ -54,7 +56,6 @@ import {
   DEFAULT_MCP_CONNECT_TIMEOUT_MS,
   DEFAULT_MCP_TIMEOUT_MS,
 } from "../src/process-manager";
-import { textHasToolCallMarkup } from "../src/tool-call-markup";
 
 const model = {
   id: "claude-opus-5-5",
@@ -104,7 +105,19 @@ const failure = (n = 0) => events(n).find((e) => e.type === "error");
 /** The args with the fresh CLI session id (and the paths named after it) masked. */
 const withoutSessionId = (argv: string[]) => {
   const id = argv[argv.indexOf("--session-id") + 1];
-  return argv.map((arg) => arg.split(id).join("<id>"));
+  const config = argv.indexOf("--mcp-config") + 1;
+  return argv.map((arg, i) =>
+    i === config ? "<config>" : arg.split(id).join("<id>"),
+  );
+};
+const configAt = (i: number) => {
+  const argv = argsAt(i);
+  return argv[argv.indexOf("--mcp-config") + 1];
+};
+const fetchTool = {
+  name: "fetch_content",
+  description: "fetch a page",
+  parameters: { type: "object", properties: {} },
 };
 const opts = (extra: any = {}) => ({
   sessionId: "lane",
@@ -115,10 +128,10 @@ const opts = (extra: any = {}) => ({
   },
   ...extra,
 });
-const ask = (extra?: any) =>
+const ask = (extra?: any, tools: any[] = [fetchTool]) =>
   streamViaCli(
     model,
-    { messages: [{ role: "user", content: "read the page" }] },
+    { messages: [{ role: "user", content: "read the page" }], tools },
     opts(extra) as any,
   );
 const settle = () => vi.advanceTimersByTimeAsync(10);
@@ -131,8 +144,8 @@ describe("MCP startup timeouts", () => {
   });
 
   it("gives the CLI's MCP client generous connect and startup limits when unset", () => {
-    vi.stubEnv("MCP_CONNECT_TIMEOUT_MS", "");
-    vi.stubEnv("MCP_TIMEOUT", "");
+    vi.stubEnv("MCP_CONNECT_TIMEOUT_MS", undefined);
+    vi.stubEnv("MCP_TIMEOUT", undefined);
     spawnClaude("claude-haiku-4-5", undefined, {
       mcpConfigPath: "/pi/bridge.json",
     });
@@ -150,6 +163,15 @@ describe("MCP startup timeouts", () => {
     const env = (spawn as any).mock.calls[0][2].env;
     expect(env.MCP_CONNECT_TIMEOUT_MS).toBe("7000");
     expect(env.MCP_TIMEOUT).toBe("9000");
+  });
+
+  it("keeps a limit the host set to the empty string", () => {
+    vi.stubEnv("MCP_CONNECT_TIMEOUT_MS", "");
+    vi.stubEnv("MCP_TIMEOUT", "");
+    spawnClaude("claude-haiku-4-5", undefined, {});
+    const env = (spawn as any).mock.calls[0][2].env;
+    expect(env.MCP_CONNECT_TIMEOUT_MS).toBe("");
+    expect(env.MCP_TIMEOUT).toBe("");
   });
 });
 
@@ -212,7 +234,7 @@ describe("custom-tools must be connected before Claude answers", () => {
   });
 });
 
-describe("tool calls written as text", () => {
+describe("custom-tools retry edges (default)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useFakeTimers();
@@ -226,48 +248,117 @@ describe("tool calls written as text", () => {
     vi.useRealTimers();
   });
 
-  it("fails a turn that wrote an invoke block instead of calling the tool", async () => {
+  it("does not spawn the retry when pi aborted after the failed init", async () => {
+    const controller = new AbortController();
+    ask({ signal: controller.signal });
+    await vi.advanceTimersByTimeAsync(0);
+    // The abort lands after the retry was decided, before it spawns.
+    const log = vi.spyOn(console, "error").mockImplementation((msg) => {
+      if (String(msg).includes("spawning once more")) controller.abort();
+    });
+    procAt(0).stdout.write(init("failed"));
+    await settle();
+    log.mockRestore();
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(failure().reason).toBe("aborted");
+  });
+
+  it("never checks MCP for a request with no tools", async () => {
+    ask({}, []);
+    await vi.advanceTimersByTimeAsync(0);
+    procAt(0).stdout.write(init("failed") + reply("plain answer"));
+    await settle();
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(failure()).toBeUndefined();
+    expect(done().message.content[0].text).toBe("plain answer");
+  });
+});
+
+describe("custom-tools retry edges (legacy)", () => {
+  let stateDir: string;
+  const resumeMiss = line({
+    type: "result",
+    subtype: "error_during_execution",
+    is_error: true,
+    errors: ["No conversation found with session ID: cli-old"],
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    resetCliProcessesForTests();
+    resetHandoffBrokerForTests();
+    process.env.PI_CLAUDE_CLI_CONTEXT = "legacy";
+    stateDir = mkdtempSync(join(tmpdir(), "pcc-mcp-startup-"));
+    process.env.PI_CLAUDE_CLI_STATE_DIR = stateDir;
+    writeFileSync(
+      join(stateDir, "session-map.json"),
+      JSON.stringify({ lane: "cli-old" }),
+    );
+  });
+
+  afterEach(() => {
+    resetCliProcessesForTests();
+    vi.useRealTimers();
+    delete process.env.PI_CLAUDE_CLI_STATE_DIR;
+    rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  it("the killed process closing late leaves the replacement's MCP config", async () => {
     ask();
     await vi.advanceTimersByTimeAsync(0);
-    procAt(0).stdout.write(
-      init("connected") +
-        reply(
-          'Reading it now.\n<invoke name="mcp__custom-tools__read">\n<parameter name="path">a.ts</parameter>\n</invoke>',
-        ),
-    );
+    expect(argsAt(0)).toContain("--resume");
+    procAt(0).stdout.write(init("failed"));
+    await settle();
+    expect(spawn).toHaveBeenCalledTimes(2);
+    const replacement = configAt(1);
+    expect(existsSync(replacement)).toBe(true);
+    procAt(0).emit("close", null);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(existsSync(replacement)).toBe(true);
+  });
+
+  it("a resume miss uses the turn's one respawn: a failed init after it fails the turn", async () => {
+    ask();
+    await vi.advanceTimersByTimeAsync(0);
+    procAt(0).stdout.write(init("connected") + resumeMiss);
+    await settle();
+    procAt(0).stdout.end();
+    await settle();
+    expect(spawn).toHaveBeenCalledTimes(2);
+    procAt(1).stdout.write(init("failed"));
+    await settle();
+    expect(spawn).toHaveBeenCalledTimes(2);
+    expect(failure().error.errorMessage).toMatch(/MCP server custom-tools/);
+  });
+
+  it("an MCP retry uses the turn's one respawn: a resume miss after it fails the turn", async () => {
+    ask();
+    await vi.advanceTimersByTimeAsync(0);
+    procAt(0).stdout.write(init("failed"));
+    await settle();
+    expect(spawn).toHaveBeenCalledTimes(2);
+    procAt(1).stdout.write(init("connected") + resumeMiss);
+    await settle();
+    procAt(1).stdout.end();
+    await settle();
+    expect(spawn).toHaveBeenCalledTimes(2);
+    const ended = done() ?? failure();
+    expect(JSON.stringify(ended)).toMatch(/No conversation found/);
+  });
+
+  it("two failed inits end the turn as a structured error", async () => {
+    ask();
+    await vi.advanceTimersByTimeAsync(0);
+    procAt(0).stdout.write(init("failed"));
+    await settle();
+    procAt(1).stdout.write(init("failed"));
     await settle();
     expect(done()).toBeUndefined();
-    expect(failure().error.errorMessage).toMatch(/tools were not connected/);
-    expect(failure().error.content[0].text).toContain("<invoke name=");
-    expect(procAt(0).stdin.end).toHaveBeenCalled(); // not parked
-  });
-
-  it("finishes a turn that only quotes invoke markup", async () => {
-    ask();
-    await vi.advanceTimersByTimeAsync(0);
-    procAt(0).stdout.write(
-      init("connected") +
-        reply(
-          'Use this:\n```xml\n<invoke name="bash">\n```\nand `<invoke name="x">` inline.',
-        ),
+    expect(failure().reason).toBe("error");
+    expect(failure().error.stopReason).toBe("error");
+    expect(failure().error.errorMessage).toBe(
+      "Claude Code could not connect pi's tools (MCP server custom-tools: failed). Try again.",
     );
-    await settle();
-    expect(failure()).toBeUndefined();
-    expect(done().message.content[0].text).toContain("Use this:");
-  });
-
-  it.each([
-    ['<invoke name="bash">', true],
-    ['    <invoke name="bash">', false],
-    ["<function_calls>", true],
-    ['text\n<function_calls>\n<invoke name="bash">', true],
-    ['say <invoke name="bash"> inline', false],
-    ['```\n<invoke name="bash">\n```', false],
-    ["~~~\n<function_calls>\n~~~", false],
-    ['```\nopen fence never closed\n<invoke name="bash">', false],
-    ["<invoke>", false],
-    ["plain answer", false],
-  ])("textHasToolCallMarkup(%j) is %s", (text, expected) => {
-    expect(textHasToolCallMarkup(text)).toBe(expected);
   });
 });
