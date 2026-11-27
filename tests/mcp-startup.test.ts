@@ -436,7 +436,15 @@ describe("custom-tools not connected (legacy: no respawn)", () => {
   });
 
   it("a failed init drops the saved prompt without a pi session id", async () => {
-    ask({ sessionId: undefined });
+    streamViaCli(
+      model,
+      {
+        systemPrompt: "LEGACY PROMPT",
+        messages: [{ role: "user", content: "read the page" }],
+        tools: [fetchTool],
+      } as any,
+      opts({ sessionId: undefined }) as any,
+    );
     await vi.advanceTimersByTimeAsync(0);
     const cliId = argsAt(0)[argsAt(0).indexOf("--session-id") + 1];
     expect(getSystemPrompt(cliId)).toBeDefined();
