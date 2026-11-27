@@ -8,7 +8,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -50,6 +56,8 @@ import spawn from "cross-spawn";
 import { streamViaCli } from "../src/provider";
 import { resetCliProcessesForTests } from "../src/cli-process";
 import { resetHandoffBrokerForTests } from "../src/handoff-broker";
+import { runtimeDir } from "../src/runtime-dir";
+import { getCliSession } from "../src/session-map";
 import {
   spawnClaude,
   cleanupSystemPromptFile,
@@ -148,6 +156,7 @@ describe("MCP startup timeouts", () => {
     vi.stubEnv("MCP_TIMEOUT", undefined);
     spawnClaude("claude-haiku-4-5", undefined, {
       mcpConfigPath: "/pi/bridge.json",
+      mcpStartupTimeouts: true,
     });
     const env = (spawn as any).mock.calls[0][2].env;
     expect(DEFAULT_MCP_CONNECT_TIMEOUT_MS).toBe(60_000);
@@ -159,7 +168,7 @@ describe("MCP startup timeouts", () => {
   it("keeps the host's own limits", () => {
     vi.stubEnv("MCP_CONNECT_TIMEOUT_MS", "7000");
     vi.stubEnv("MCP_TIMEOUT", "9000");
-    spawnClaude("claude-haiku-4-5", undefined, {});
+    spawnClaude("claude-haiku-4-5", undefined, { mcpStartupTimeouts: true });
     const env = (spawn as any).mock.calls[0][2].env;
     expect(env.MCP_CONNECT_TIMEOUT_MS).toBe("7000");
     expect(env.MCP_TIMEOUT).toBe("9000");
@@ -168,10 +177,29 @@ describe("MCP startup timeouts", () => {
   it("keeps a limit the host set to the empty string", () => {
     vi.stubEnv("MCP_CONNECT_TIMEOUT_MS", "");
     vi.stubEnv("MCP_TIMEOUT", "");
-    spawnClaude("claude-haiku-4-5", undefined, {});
+    spawnClaude("claude-haiku-4-5", undefined, { mcpStartupTimeouts: true });
     const env = (spawn as any).mock.calls[0][2].env;
     expect(env.MCP_CONNECT_TIMEOUT_MS).toBe("");
     expect(env.MCP_TIMEOUT).toBe("");
+  });
+
+  it("on Windows, a host's limit in any letter case counts as set", () => {
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { value: "win32" });
+    try {
+      vi.stubEnv("MCP_CONNECT_TIMEOUT_MS", undefined);
+      vi.stubEnv("MCP_TIMEOUT", undefined);
+      vi.stubEnv("mcp_timeout", "9000");
+      vi.stubEnv("Mcp_Connect_Timeout_Ms", "7000");
+      spawnClaude("claude-haiku-4-5", undefined, { mcpStartupTimeouts: true });
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+    }
+    const env = (spawn as any).mock.calls[0][2].env;
+    expect(env.MCP_TIMEOUT).toBeUndefined();
+    expect(env.MCP_CONNECT_TIMEOUT_MS).toBeUndefined();
+    expect(env.mcp_timeout).toBe("9000");
+    expect(env.Mcp_Connect_Timeout_Ms).toBe("7000");
   });
 });
 
@@ -263,6 +291,44 @@ describe("custom-tools retry edges (default)", () => {
     expect(failure().reason).toBe("aborted");
   });
 
+  it("keeps Claude Code's own MCP startup limits for a request with no tools", async () => {
+    vi.stubEnv("MCP_CONNECT_TIMEOUT_MS", undefined);
+    vi.stubEnv("MCP_TIMEOUT", undefined);
+    try {
+      ask({}, []);
+      await vi.advanceTimersByTimeAsync(0);
+      ask({ sessionId: "other" });
+      await vi.advanceTimersByTimeAsync(0);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    const [noTools, withTools] = [0, 1].map(
+      (i) => (spawn as any).mock.calls[i][2].env,
+    );
+    // The empty bridge is still passed, exactly as before.
+    expect(argsAt(0)).toContain("--mcp-config");
+    expect(noTools.MCP_TIMEOUT).toBeUndefined();
+    expect(noTools.MCP_CONNECT_TIMEOUT_MS).toBeUndefined();
+    expect(withTools.MCP_TIMEOUT).toBe("120000");
+    expect(withTools.MCP_CONNECT_TIMEOUT_MS).toBe("60000");
+  });
+
+  it("removes the MCP config of a spawn that failed before it started", async () => {
+    const configs = () =>
+      readdirSync(runtimeDir()).filter((f) => f.startsWith("mcp-config-"));
+    const before = configs();
+    vi.stubEnv("CLAUDE_CODE_SAFE_MODE", "1");
+    try {
+      ask();
+      await vi.advanceTimersByTimeAsync(0);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect(spawn).not.toHaveBeenCalled();
+    expect(failure().error.errorMessage).toMatch(/CLAUDE_CODE_SAFE_MODE/);
+    expect(configs()).toEqual(before);
+  });
+
   it("never checks MCP for a request with no tools", async () => {
     ask({}, []);
     await vi.advanceTimersByTimeAsync(0);
@@ -332,19 +398,43 @@ describe("custom-tools retry edges (legacy)", () => {
     expect(failure().error.errorMessage).toMatch(/MCP server custom-tools/);
   });
 
-  it("an MCP retry uses the turn's one respawn: a resume miss after it fails the turn", async () => {
+  it("an MCP retry imports pi's history into a fresh session, never resuming the failed one", async () => {
+    ask();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(argsAt(0)[argsAt(0).indexOf("--resume") + 1]).toBe("cli-old");
+    procAt(0).stdout.write(init("failed"));
+    await settle();
+    expect(spawn).toHaveBeenCalledTimes(2);
+    // Claude Code records the prompt before init: resuming would send it twice.
+    expect(argsAt(1)).not.toContain("--resume");
+    const fresh = argsAt(1)[argsAt(1).indexOf("--session-id") + 1];
+    expect(fresh).toMatch(/^[0-9a-f-]{36}$/);
+    expect(getCliSession("lane")).toBe(fresh);
+    procAt(1).stdout.write(init("connected") + reply("fetched"));
+    await settle();
+    expect(failure()).toBeUndefined();
+    expect(done().message.content[0].text).toBe("fetched");
+  });
+
+  it("drops the failed mapping when the retry's init fails too", async () => {
     ask();
     await vi.advanceTimersByTimeAsync(0);
     procAt(0).stdout.write(init("failed"));
     await settle();
-    expect(spawn).toHaveBeenCalledTimes(2);
-    procAt(1).stdout.write(init("connected") + resumeMiss);
+    procAt(1).stdout.write(init("failed"));
     await settle();
-    procAt(1).stdout.end();
-    await settle();
-    expect(spawn).toHaveBeenCalledTimes(2);
-    const ended = done() ?? failure();
-    expect(JSON.stringify(ended)).toMatch(/No conversation found/);
+    expect(getCliSession("lane")).toBeUndefined();
+  });
+
+  it("an already-aborted cold request spawns nothing and ends as aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    ask({ signal: controller.signal });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(spawn).not.toHaveBeenCalled();
+    expect(done()).toBeUndefined();
+    expect(failure().reason).toBe("aborted");
+    expect(failure().error.stopReason).toBe("aborted");
   });
 
   it("two failed inits end the turn as a structured error", async () => {
