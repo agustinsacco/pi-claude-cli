@@ -196,7 +196,7 @@ describe("custom-tools must be connected before Claude answers", () => {
     expect(done()).toBeUndefined();
     expect(failure().error.stopReason).toBe("error");
     expect(failure().error.errorMessage).toBe(
-      "Claude Code could not connect Phosphor's tools (MCP server custom-tools: pending). Try again.",
+      "Claude Code could not connect pi's tools (MCP server custom-tools: pending). Try again.",
     );
   });
 

@@ -968,7 +968,7 @@ export function streamViaCli(
         }
         void discardProcess();
         endStreamWithError(
-          `Claude Code could not connect Phosphor's tools (MCP server ${MCP_SERVER_NAME}: ${server.status ?? "unknown"}). Try again.`,
+          `Claude Code could not connect pi's tools (MCP server ${MCP_SERVER_NAME}: ${server.status ?? "unknown"}). Try again.`,
         );
       }
 
