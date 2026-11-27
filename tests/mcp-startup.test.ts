@@ -57,7 +57,11 @@ import { streamViaCli } from "../src/provider";
 import { resetCliProcessesForTests } from "../src/cli-process";
 import { resetHandoffBrokerForTests } from "../src/handoff-broker";
 import { runtimeDir } from "../src/runtime-dir";
-import { getCliSession } from "../src/session-map";
+import {
+  getCliSession,
+  getSystemPrompt,
+  setSystemPrompt,
+} from "../src/session-map";
 import {
   spawnClaude,
   cleanupSystemPromptFile,
@@ -329,6 +333,19 @@ describe("custom-tools retry edges (default)", () => {
     expect(configs()).toEqual(before);
   });
 
+  it("the killed process closing late leaves the replacement's MCP config", async () => {
+    ask();
+    await vi.advanceTimersByTimeAsync(0);
+    procAt(0).stdout.write(init("failed"));
+    await settle();
+    expect(spawn).toHaveBeenCalledTimes(2);
+    const replacement = configAt(1);
+    expect(existsSync(replacement)).toBe(true);
+    procAt(0).emit("close", null);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(existsSync(replacement)).toBe(true);
+  });
+
   it("never checks MCP for a request with no tools", async () => {
     ask({}, []);
     await vi.advanceTimersByTimeAsync(0);
@@ -340,7 +357,7 @@ describe("custom-tools retry edges (default)", () => {
   });
 });
 
-describe("custom-tools retry edges (legacy)", () => {
+describe("custom-tools not connected (legacy: no respawn)", () => {
   let stateDir: string;
   const resumeMiss = line({
     type: "result",
@@ -370,20 +387,6 @@ describe("custom-tools retry edges (legacy)", () => {
     rmSync(stateDir, { recursive: true, force: true });
   });
 
-  it("the killed process closing late leaves the replacement's MCP config", async () => {
-    ask();
-    await vi.advanceTimersByTimeAsync(0);
-    expect(argsAt(0)).toContain("--resume");
-    procAt(0).stdout.write(init("failed"));
-    await settle();
-    expect(spawn).toHaveBeenCalledTimes(2);
-    const replacement = configAt(1);
-    expect(existsSync(replacement)).toBe(true);
-    procAt(0).emit("close", null);
-    await vi.advanceTimersByTimeAsync(5_000);
-    expect(existsSync(replacement)).toBe(true);
-  });
-
   it("a resume miss uses the turn's one respawn: a failed init after it fails the turn", async () => {
     ask();
     await vi.advanceTimersByTimeAsync(0);
@@ -398,32 +401,50 @@ describe("custom-tools retry edges (legacy)", () => {
     expect(failure().error.errorMessage).toMatch(/MCP server custom-tools/);
   });
 
-  it("an MCP retry imports pi's history into a fresh session, never resuming the failed one", async () => {
+  it("a failed init spawns nothing more and ends as a structured error", async () => {
     ask();
     await vi.advanceTimersByTimeAsync(0);
     expect(argsAt(0)[argsAt(0).indexOf("--resume") + 1]).toBe("cli-old");
     procAt(0).stdout.write(init("failed"));
     await settle();
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(procAt(0).kill).toHaveBeenCalledWith("SIGKILL");
+    expect(done()).toBeUndefined();
+    expect(failure().reason).toBe("error");
+    expect(failure().error.stopReason).toBe("error");
+    expect(failure().error.errorMessage).toBe(
+      "Claude Code could not connect pi's tools (MCP server custom-tools: failed). Try again.",
+    );
+  });
+
+  it("a failed init drops the mapping and saved prompt; the next turn imports fresh", async () => {
+    setSystemPrompt("cli-old", "LEGACY PROMPT");
+    ask();
+    await vi.advanceTimersByTimeAsync(0);
+    procAt(0).stdout.write(init("pending"));
+    await settle();
+    expect(getCliSession("lane")).toBeUndefined();
+    expect(getSystemPrompt("cli-old")).toBeUndefined();
+    // The transcript is Claude Code's; it is left on disk.
+    ask();
+    await vi.advanceTimersByTimeAsync(0);
     expect(spawn).toHaveBeenCalledTimes(2);
-    // Claude Code records the prompt before init: resuming would send it twice.
     expect(argsAt(1)).not.toContain("--resume");
     const fresh = argsAt(1)[argsAt(1).indexOf("--session-id") + 1];
     expect(fresh).toMatch(/^[0-9a-f-]{36}$/);
-    expect(getCliSession("lane")).toBe(fresh);
-    procAt(1).stdout.write(init("connected") + reply("fetched"));
-    await settle();
-    expect(failure()).toBeUndefined();
-    expect(done().message.content[0].text).toBe("fetched");
+    expect(fresh).not.toBe("cli-old");
   });
 
-  it("drops the failed mapping when the retry's init fails too", async () => {
-    ask();
+  it("a failed init drops the saved prompt without a pi session id", async () => {
+    ask({ sessionId: undefined });
     await vi.advanceTimersByTimeAsync(0);
+    const cliId = argsAt(0)[argsAt(0).indexOf("--session-id") + 1];
+    expect(getSystemPrompt(cliId)).toBeDefined();
     procAt(0).stdout.write(init("failed"));
     await settle();
-    procAt(1).stdout.write(init("failed"));
-    await settle();
-    expect(getCliSession("lane")).toBeUndefined();
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(failure().error.stopReason).toBe("error");
+    expect(getSystemPrompt(cliId)).toBeUndefined();
   });
 
   it("an already-aborted cold request spawns nothing and ends as aborted", async () => {
@@ -435,20 +456,5 @@ describe("custom-tools retry edges (legacy)", () => {
     expect(done()).toBeUndefined();
     expect(failure().reason).toBe("aborted");
     expect(failure().error.stopReason).toBe("aborted");
-  });
-
-  it("two failed inits end the turn as a structured error", async () => {
-    ask();
-    await vi.advanceTimersByTimeAsync(0);
-    procAt(0).stdout.write(init("failed"));
-    await settle();
-    procAt(1).stdout.write(init("failed"));
-    await settle();
-    expect(done()).toBeUndefined();
-    expect(failure().reason).toBe("error");
-    expect(failure().error.stopReason).toBe("error");
-    expect(failure().error.errorMessage).toBe(
-      "Claude Code could not connect pi's tools (MCP server custom-tools: failed). Try again.",
-    );
   });
 });
