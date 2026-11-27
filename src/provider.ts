@@ -433,17 +433,13 @@ export function streamViaCli(
    * The driver below retries once with a fresh session imported from pi's
    * full history, re-recording the mapping.
    *
-   * Returns "mcp-retry" (again without touching the stream) when the process
-   * it spawned reported pi's schema server as not connected; the driver spawns
-   * once more, importing pi's history into a fresh session (the failed one
-   * may already hold the prompt).
-   *
-   * A turn respawns at most once for either reason. `lastAttempt` marks that
-   * respawn: it never asks for another, and fails the turn instead.
+   * Returns "mcp-retry" (again without touching the stream, default mode
+   * only) when the process it spawned reported pi's schema server as not
+   * connected; the driver spawns once more with forceFullReplay set, which
+   * marks that respawn: it fails the turn instead of asking again.
    */
   async function runOnce(
     forceFullReplay: boolean,
-    lastAttempt: boolean,
   ): Promise<"ok" | "resume-miss" | "mcp-retry"> {
     let cli: CliProcess | undefined;
     let abortHandler: (() => void) | undefined;
@@ -967,7 +963,8 @@ export function streamViaCli(
        * (MCP_TIMEOUT), then lists each one in `init`. A model run without
        * pi's schema server still sees the tool names in pi's prompt and writes
        * its calls as text, so such a process never gets to answer: it is
-       * killed and spawned once more, then the turn fails.
+       * killed. The default path spawns once more, then fails the turn; the
+       * legacy path fails the turn at once.
        */
       function checkMcpServer(init: {
         mcp_servers?: Array<{ name?: string; status?: string }>;
@@ -978,14 +975,14 @@ export function streamViaCli(
         );
         if (!server || server.status === "connected") return;
         forceKillProcess(proc);
-        // A legacy mapping must not point at this session: Claude Code
-        // records the prompt before init, so resuming it would send the
-        // prompt twice. The transcript itself stays on disk.
-        if (!piOwned && piSessionId) {
-          clearCliSession(piSessionId);
+        // Legacy: nothing may resume this session. Claude Code records the
+        // prompt before init, so a resume would send it twice; the next turn
+        // imports fresh. The transcript itself stays on disk.
+        if (!piOwned) {
+          if (piSessionId) clearCliSession(piSessionId);
           clearSystemPrompt(live.cliSessionId);
         }
-        if (!lastAttempt && !aborted) {
+        if (piOwned && !forceFullReplay && !aborted) {
           retry = "mcp-retry";
           void discardProcess();
           finishEpisode();
@@ -1152,7 +1149,6 @@ export function streamViaCli(
                   : `Claude CLI returned ${r.subtype ?? "non-success result"}`);
               if (
                 resumeSessionId &&
-                !lastAttempt &&
                 /No conversation found with session ID/i.test(errMsg)
               ) {
                 // Recoverable: the sidecar pointed at a CLI session that no
@@ -1330,19 +1326,17 @@ export function streamViaCli(
 
   (async () => {
     try {
-      // One respawn per turn, whichever the reason: the retry runs as the
-      // last attempt, which never asks for another.
-      const outcome = await runOnce(false, false);
+      const outcome = await runOnce(false);
       if (outcome === "resume-miss") {
         console.error(
           "[pi-claude-cli] CLI session missing for --resume — importing pi history into a fresh CLI session",
         );
-        await runOnce(true, true);
+        await runOnce(true);
       } else if (outcome === "mcp-retry") {
         console.error(
           `[pi-claude-cli] Claude Code did not connect MCP server ${MCP_SERVER_NAME} — spawning once more`,
         );
-        await runOnce(true, true);
+        await runOnce(true);
       }
     } catch (err: any) {
       if (piOwned) {
