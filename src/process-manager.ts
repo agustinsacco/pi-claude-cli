@@ -54,6 +54,22 @@ function isStrictMcp(): boolean {
  */
 /** One hour: the MCP tool-call timeout handed to the CLI when unset. */
 export const DEFAULT_MCP_TOOL_TIMEOUT_MS = 3_600_000;
+/**
+ * The CLI's MCP startup limits, handed over when unset and only for a
+ * request with tools (a text-only request keeps Claude Code's own). Claude Code defaults
+ * to a 5 s connect (MCP_CONNECT_TIMEOUT_MS) and a 30 s startup
+ * (MCP_TIMEOUT), and with an explicit --mcp-config it holds the first turn
+ * for MCP_TIMEOUT. On a loaded machine (load 15–55) the schema server missed
+ * that, init reported `custom-tools` as failed, and the model answered
+ * without pi's tools. Verified on claude 2.1.327 with a server that took 40 s
+ * to start: defaults gave `failed` and no tools, these gave `connected`.
+ *
+ * CLAUDE_CODE_MCP_STARTUP_WAIT_MS is left alone: it replaces that same
+ * first-turn hold with its own deadline, capped by an internal constant of
+ * the CLI's, so it adds nothing MCP_TIMEOUT does not and could shorten it.
+ */
+export const DEFAULT_MCP_CONNECT_TIMEOUT_MS = 60_000;
+export const DEFAULT_MCP_TIMEOUT_MS = 120_000;
 
 function systemPromptFilePath(sessionKey?: string): string {
   // In the private 0700 runtime directory, written 0600: the prompt carries
@@ -79,6 +95,11 @@ export function spawnClaude(
     systemPromptMode?: SystemPromptMode;
     /** The prompt-cache lifetime to ask for; unset leaves the CLI's default. */
     cacheTtl?: "5m" | "1h";
+    /**
+     * The request has tools on the MCP bridge: give the CLI's MCP client the
+     * longer startup limits. Without tools Claude Code keeps its own.
+     */
+    mcpStartupTimeouts?: boolean;
   },
 ): ChildProcess {
   const piContext = usesPiContext();
@@ -251,6 +272,13 @@ export function spawnClaude(
   if (options?.cacheTtl) env.CLAUDE_CODE_PROMPT_CACHE_TTL = options.cacheTtl;
   if (!env.MCP_TOOL_TIMEOUT)
     env.MCP_TOOL_TIMEOUT = String(DEFAULT_MCP_TOOL_TIMEOUT_MS);
+  // Absent only: a host that set either one, even to "", keeps its value.
+  if (options?.mcpStartupTimeouts) {
+    if (!envHas(env, "MCP_CONNECT_TIMEOUT_MS"))
+      env.MCP_CONNECT_TIMEOUT_MS = String(DEFAULT_MCP_CONNECT_TIMEOUT_MS);
+    if (!envHas(env, "MCP_TIMEOUT"))
+      env.MCP_TIMEOUT = String(DEFAULT_MCP_TIMEOUT_MS);
+  }
 
   const proc = spawn("claude", args, {
     stdio: ["pipe", "pipe", "pipe"],
@@ -259,6 +287,19 @@ export function spawnClaude(
   });
 
   return proc as ChildProcess;
+}
+
+/**
+ * Whether `name` is set in a copy of the environment. Windows variable names
+ * ignore case, but a copy of process.env is a plain object: a host's
+ * `mcp_timeout` would survive beside an uppercase default, and the child
+ * would get whichever Node keeps.
+ */
+function envHas(env: NodeJS.ProcessEnv, name: string): boolean {
+  if (process.platform !== "win32") return env[name] !== undefined;
+  return Object.keys(env).some(
+    (key) => key.toUpperCase() === name && env[key] !== undefined,
+  );
 }
 
 /**

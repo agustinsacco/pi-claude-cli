@@ -449,16 +449,17 @@ describe("writeSessionMcpConfig", () => {
       "cli-77",
       "/tmp/h.secret",
     ]);
-    // Written once per session.
-    expect(
-      writeSessionMcpConfig(
-        "cli-77",
-        "/tmp/schema.json",
-        "/tmp/h.sock",
-        "/tmp/h.secret",
-      ),
-    ).toBe(path);
-    expect(mocks.writeFileSync).toHaveBeenCalledTimes(1);
+    // Every spawn gets its own file: a killed process cleaning up late must
+    // not unlink the config its replacement (same session id) is reading.
+    const again = writeSessionMcpConfig(
+      "cli-77",
+      "/tmp/schema.json",
+      "/tmp/h.sock",
+      "/tmp/h.secret",
+    );
+    expect(again).not.toBe(path);
+    expect(again).toContain("cli-77");
+    expect(mocks.writeFileSync).toHaveBeenCalledTimes(2);
   });
 
   it("passes the secret as a path, never as a literal on the server's argv", async () => {
@@ -509,8 +510,9 @@ describe("writeSessionMcpConfig", () => {
       await import("../src/mcp-config");
     const a = writeSessionMcpConfig("cli-a", "/tmp/s.json", "/tmp/h.sock");
     const b = writeSessionMcpConfig("cli-b", "/tmp/s.json", "/tmp/h.sock");
-    removeSessionMcpConfig("cli-a");
+    removeSessionMcpConfig(a);
     expect(mocks.unlinkSync).toHaveBeenCalledWith(a);
+    expect(mocks.unlinkSync).not.toHaveBeenCalledWith(b);
     cleanupMcpConfigFiles();
     expect(mocks.unlinkSync).toHaveBeenCalledWith(b);
   });

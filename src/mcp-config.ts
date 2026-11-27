@@ -30,6 +30,9 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runtimeFile, RUNTIME_FILE_MODE } from "./runtime-dir.js";
 
+/** The name pi's schema server goes by in every MCP config written here. */
+export const MCP_SERVER_NAME = "custom-tools";
+
 /** The 6 built-in tools that pi handles natively (match pi tool names). */
 const BUILT_IN_TOOL_NAMES = new Set([
   "read",
@@ -39,6 +42,11 @@ const BUILT_IN_TOOL_NAMES = new Set([
   "grep",
   "find",
 ]);
+
+/** One of the tools pi runs natively, never served by the legacy schema server. */
+export function isBuiltInToolName(name: unknown): boolean {
+  return typeof name === "string" && BUILT_IN_TOOL_NAMES.has(name);
+}
 
 /** A custom tool definition with MCP-compatible schema. */
 export interface McpToolDef {
@@ -72,8 +80,10 @@ export interface SchemaFileWrite {
 const schemaPaths = new Set<string>();
 /** The schema file the legacy per-process config names. */
 let configSchemaPath: string | undefined;
-/** Per-session config files this process wrote, for exit cleanup. */
-const sessionConfigPaths = new Map<string, string>();
+/** Per-spawn config files this process wrote, for exit cleanup. */
+const sessionConfigPaths = new Set<string>();
+/** Numbers each spawn's config so no two spawns ever share a file. */
+let sessionConfigSeq = 0;
 
 /**
  * Get custom tool definitions from pi, filtering out built-in tools.
@@ -105,7 +115,9 @@ function configFilePath(): string {
 function sessionConfigFilePath(cliSessionId: string): string {
   // The session id reaches us from the CLI. Keep it out of the path so a
   // hostile value cannot traverse out of the runtime directory.
-  return runtimeFile(`mcp-config-${safeFileSegment(cliSessionId)}.json`);
+  return runtimeFile(
+    `mcp-config-${safeFileSegment(cliSessionId)}-${++sessionConfigSeq}.json`,
+  );
 }
 
 /** Reduce an id to characters that cannot escape or confuse a path. */
@@ -152,7 +164,7 @@ export function writeMcpConfig(toolDefs: McpToolDef[]): McpConfigWrite {
   if (configSchemaPath !== schemaPath) {
     const config = {
       mcpServers: {
-        "custom-tools": {
+        [MCP_SERVER_NAME]: {
           command: "node",
           args: [serverPath(), schemaPath],
         },
@@ -168,9 +180,10 @@ export function writeMcpConfig(toolDefs: McpToolDef[]): McpConfigWrite {
 }
 
 /**
- * Write the `--mcp-config` file for ONE CLI session. The schema server gets
+ * Write the `--mcp-config` file for ONE spawn of a CLI session. The schema server gets
  * the handoff socket and the session id so its `tools/call` requests reach
- * the pi session that owns this CLI process. Written once per session id.
+ * the pi session that owns this CLI process. Every call writes a new file,
+ * owned by the one spawn that uses it (see removeSessionMcpConfig).
  *
  * `secretPath` points at the broker's shared secret. It is a path and not the
  * secret itself because these args become the schema server's argv, which
@@ -182,29 +195,31 @@ export function writeSessionMcpConfig(
   handoffSocketPath?: string,
   secretPath?: string,
 ): string {
-  const existing = sessionConfigPaths.get(cliSessionId);
-  if (existing) return existing;
   const configPath = sessionConfigFilePath(cliSessionId);
   const args = handoffSocketPath
     ? [serverPath(), schemaPath, handoffSocketPath, cliSessionId, secretPath]
     : [serverPath(), schemaPath];
   const config = {
     mcpServers: {
-      "custom-tools": { command: "node", args: args.filter(Boolean) },
+      [MCP_SERVER_NAME]: { command: "node", args: args.filter(Boolean) },
     },
   };
   writeFileSync(configPath, JSON.stringify(config), {
     mode: RUNTIME_FILE_MODE,
   });
-  sessionConfigPaths.set(cliSessionId, configPath);
+  sessionConfigPaths.add(configPath);
   return configPath;
 }
 
-/** Remove one session's config file (the session will not be spawned again). */
-export function removeSessionMcpConfig(cliSessionId: string): void {
-  const path = sessionConfigPaths.get(cliSessionId);
-  if (!path) return;
-  sessionConfigPaths.delete(cliSessionId);
+/**
+ * Remove one spawn's config file. Keyed by the path, not the session id: a
+ * respawn under the same id (a legacy --resume) has its own file, which the
+ * killed process's late cleanup must not touch. A path this module did not
+ * write (a host's verbatim --mcp-config) is never removed.
+ */
+export function removeSessionMcpConfig(configPath: string | undefined): void {
+  if (!configPath || !sessionConfigPaths.delete(configPath)) return;
+  const path = configPath;
   try {
     unlinkSync(path);
   } catch {
